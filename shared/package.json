@@ -1,0 +1,11 @@
+{
+  "name": "@workflow-agent/shared",
+  "version": "0.1.0",
+  "description": "Shared TypeScript types and constants for the workflow automation agent",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  }
+}

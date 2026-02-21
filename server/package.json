@@ -1,0 +1,10 @@
+{
+  "name": "@workflow-agent/server",
+  "version": "0.1.0",
+  "description": "Cloud backend — API, reasoning engine, command router, and platform services",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "dev": "echo 'Server not yet implemented — see implementation briefs'"
+  }
+}

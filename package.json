@@ -1,0 +1,19 @@
+{
+  "name": "workflow-agent",
+  "version": "0.1.0",
+  "description": "B2B workflow automation agent — learns from human demonstrations, executes autonomously",
+  "private": true,
+  "workspaces": [
+    "local-agent",
+    "server",
+    "shared",
+    "dashboard"
+  ],
+  "scripts": {
+    "agent:dev": "npm run dev --workspace=local-agent",
+    "agent:test-server": "npm run test-server --workspace=local-agent"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

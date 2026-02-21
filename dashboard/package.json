@@ -1,0 +1,10 @@
+{
+  "name": "@workflow-agent/dashboard",
+  "version": "0.1.0",
+  "description": "Frontend web application — workflow management, agent chat, audit log",
+  "private": true,
+  "scripts": {
+    "build": "echo 'Dashboard not yet implemented — see implementation briefs'",
+    "dev": "echo 'Dashboard not yet implemented — see implementation briefs'"
+  }
+}
