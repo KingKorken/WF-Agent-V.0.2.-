@@ -196,8 +196,10 @@ export interface AXSnapshotElement {
   value?: string;
   /** Whether the element is enabled */
   enabled: boolean;
-  /** Path to the element in the accessibility tree */
-  elementPath: string[];
+  /** Window index (0-based) within the application */
+  windowIndex: number;
+  /** Flat index in window.entireContents() — used by actions */
+  flatIndex: number;
 }
 
 // ---------------------------------------------------------------------------

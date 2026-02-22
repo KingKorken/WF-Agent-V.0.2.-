@@ -5,13 +5,19 @@
  *   - Sequential ref ID assignment (ax_1, ax_2, ...)
  *   - Flat element snapshots for interactive elements
  *   - Element search by role/label
- *   - Persistent ref→elementPath mapping for use in actions
+ *   - Persistent ref → { appName, windowIndex, flatIndex } mapping for actions
+ *
+ * Refs from getElementSnapshot() are ACTIONABLE — they store the flat index
+ * from window.entireContents() so ax-actions.ts can re-access the element.
+ *
+ * Refs from getAppTree() are DISPLAY-ONLY — they are assigned IDs for the
+ * tree view but are not stored in the action map.
  *
  * The "ax_" prefix on ref IDs distinguishes them from CDP's "e" prefix,
  * so the cloud can tell which layer an element belongs to.
  */
 
-import { AXNode, RawAXElement, getAppAccessibilityTree, getInteractiveElements } from './macos-ax';
+import { AXNode, RawAXElement, RawInteractiveElement, getAppAccessibilityTree, getInteractiveElements } from './macos-ax';
 import { log, error as logError } from '../../utils/logger';
 
 /** Timestamp prefix for log messages */
@@ -35,8 +41,10 @@ export interface AXSnapshotElement {
   value: string;
   /** Whether the element is enabled */
   enabled: boolean;
-  /** Path to the element for interaction */
-  elementPath: string[];
+  /** Window index (for informational purposes) */
+  windowIndex: number;
+  /** Flat index in window.entireContents() — used by actions */
+  flatIndex: number;
 }
 
 /** Result of getting the full accessibility tree */
@@ -70,20 +78,21 @@ export interface AXFindResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Maps ref IDs (e.g. "ax_1") to element paths.
- * Reset each time a new snapshot is taken.
+ * Maps ref IDs (e.g. "ax_1") to flat element indices.
+ * Reset each time a new snapshot is taken via getElementSnapshot().
+ * Refs from getAppTree() are NOT stored here — they are display-only.
  */
-let refToPath: Map<string, { appName: string; elementPath: string[] }> = new Map();
+let refToFlat: Map<string, { appName: string; windowIndex: number; flatIndex: number }> = new Map();
 
 /** The app name for the current snapshot */
 let snapshotAppName: string | null = null;
 
 /**
- * Look up the stored element path for a given ref ID.
- * Returns null if the ref is unknown.
+ * Look up the stored flat index for a given ref ID.
+ * Returns null if the ref is unknown or came from getAppTree() (display-only).
  */
-export function getPathForRef(ref: string): { appName: string; elementPath: string[] } | null {
-  return refToPath.get(ref) || null;
+export function getPathForRef(ref: string): { appName: string; windowIndex: number; flatIndex: number } | null {
+  return refToFlat.get(ref) || null;
 }
 
 /**
@@ -94,12 +103,13 @@ export function getSnapshotAppName(): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Tree Reader
+// Tree Reader (display only — no action mapping)
 // ---------------------------------------------------------------------------
 
 /**
  * Get the full accessibility tree of an application.
- * Returns a hierarchical tree with assigned ref IDs.
+ * Returns a hierarchical tree with assigned ref IDs for DISPLAY only.
+ * These refs are NOT stored in the action map — use getElementSnapshot() for actions.
  *
  * @param appName - The application name (e.g. "TextEdit")
  * @param depth - Maximum tree depth (default 3)
@@ -111,28 +121,16 @@ export async function getAppTree(appName: string, depth: number = 3): Promise<AX
     const rawWindows = await getAppAccessibilityTree(appName, depth);
 
     if (rawWindows.length === 0) {
-      return {
-        success: true,
-        app: appName,
-        windows: [],
-        elementCount: 0,
-      };
+      return { success: true, app: appName, windows: [], elementCount: 0 };
     }
 
-    // Assign sequential ref IDs to all nodes
-    let refCounter = 0;
-    refToPath = new Map();
-    snapshotAppName = appName;
+    // Assign sequential display IDs — NOT stored in action map
+    let idCounter = 0;
 
     function assignIds(raw: RawAXElement): AXNode {
-      refCounter++;
-      const ref = `ax_${refCounter}`;
-
-      // Store the mapping for later actions
-      refToPath.set(ref, { appName, elementPath: raw.elementPath });
-
+      idCounter++;
       return {
-        id: ref,
+        id: `ax_${idCounter}`,
         role: raw.role,
         label: raw.label,
         value: raw.value,
@@ -145,13 +143,13 @@ export async function getAppTree(appName: string, depth: number = 3): Promise<AX
 
     const windows = rawWindows.map(assignIds);
 
-    log(`[${timestamp()}] [ax-tree] Tree has ${refCounter} elements`);
+    log(`[${timestamp()}] [ax-tree] Tree has ${idCounter} elements`);
 
     return {
       success: true,
       app: appName,
       windows,
-      elementCount: refCounter,
+      elementCount: idCounter,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -161,15 +159,13 @@ export async function getAppTree(appName: string, depth: number = 3): Promise<AX
 }
 
 // ---------------------------------------------------------------------------
-// Element Snapshot
+// Element Snapshot (interactive elements with actionable refs)
 // ---------------------------------------------------------------------------
 
 /**
  * Get a flat list of interactive elements from an application.
- * Similar to the CDP element snapshot but for desktop apps.
- *
- * Each element gets a ref ID (ax_1, ax_2, ...) that can be used
- * in subsequent action commands.
+ * Each element gets a ref ID (ax_1, ax_2, ...) that can be used in actions.
+ * The ref→{windowIndex, flatIndex} mapping is persisted for action use.
  *
  * @param appName - The application name
  */
@@ -177,17 +173,21 @@ export async function getElementSnapshot(appName: string): Promise<AXSnapshotRes
   try {
     log(`[${timestamp()}] [ax-tree] Getting element snapshot for "${appName}"`);
 
-    const rawElements = await getInteractiveElements(appName);
+    const rawElements: RawInteractiveElement[] = await getInteractiveElements(appName);
 
-    // Reset the mapping
-    refToPath = new Map();
+    // Reset the mapping for this session
+    refToFlat = new Map();
     snapshotAppName = appName;
 
     const elements: AXSnapshotElement[] = rawElements.map((raw, i) => {
       const ref = `ax_${i + 1}`;
 
-      // Store the mapping for later actions
-      refToPath.set(ref, { appName, elementPath: raw.elementPath });
+      // Store flat index mapping for action use
+      refToFlat.set(ref, {
+        appName,
+        windowIndex: raw.windowIndex,
+        flatIndex: raw.flatIndex,
+      });
 
       return {
         ref,
@@ -195,7 +195,8 @@ export async function getElementSnapshot(appName: string): Promise<AXSnapshotRes
         label: raw.label,
         value: raw.value,
         enabled: raw.enabled,
-        elementPath: raw.elementPath,
+        windowIndex: raw.windowIndex,
+        flatIndex: raw.flatIndex,
       };
     });
 
@@ -220,10 +221,10 @@ export async function getElementSnapshot(appName: string): Promise<AXSnapshotRes
 
 /**
  * Find elements matching specific criteria.
- * Searches by role and/or label within the snapshot.
+ * Takes a fresh snapshot and filters by role and/or label.
  *
  * @param appName - The application name
- * @param query - Search criteria: role, label, and/or value (all optional, case-insensitive partial match)
+ * @param query - Search criteria (all optional, case-insensitive partial match)
  */
 export async function findElement(
   appName: string,
@@ -232,18 +233,15 @@ export async function findElement(
   try {
     log(`[${timestamp()}] [ax-tree] Finding elements in "${appName}": ${JSON.stringify(query)}`);
 
-    // Take a fresh snapshot first
     const snapshot = await getElementSnapshot(appName);
     if (!snapshot.success || !snapshot.elements) {
       return { success: false, error: snapshot.error || 'Failed to get snapshot' };
     }
 
-    // Filter elements matching the query
     const matches = snapshot.elements.filter((el) => {
       if (query.role) {
         const queryRole = query.role.toLowerCase();
         const elRole = el.role.toLowerCase();
-        // Match "button" to "AXButton", "cell" to "AXCell", etc.
         if (!elRole.includes(queryRole) && !elRole.replace('ax', '').includes(queryRole)) {
           return false;
         }
@@ -263,11 +261,7 @@ export async function findElement(
 
     log(`[${timestamp()}] [ax-tree] Found ${matches.length} matching elements`);
 
-    return {
-      success: true,
-      elements: matches,
-      count: matches.length,
-    };
+    return { success: true, elements: matches, count: matches.length };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logError(`[${timestamp()}] [ax-tree] Find failed: ${message}`);

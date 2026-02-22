@@ -10,6 +10,12 @@
  * This avoids ALL shell escaping issues that arise when passing complex scripts
  * with single/double quotes via the `-e` flag.
  *
+ * Element interaction uses flat indexing via window.entireContents():
+ *   - During snapshot: iterate entireContents(), record the flatIndex of each
+ *     interactive element so we can find it again reliably.
+ *   - During action: re-run entireContents() and access element[flatIndex]
+ *     directly — no fragile tree-path navigation.
+ *
  * Requirements:
  *   - macOS only
  *   - The app (Terminal / Electron) needs Accessibility permissions in
@@ -35,7 +41,7 @@ function timestamp(): string {
 // Core types
 // ---------------------------------------------------------------------------
 
-/** A node in the accessibility tree */
+/** A node in the accessibility tree (for getAppAccessibilityTree display) */
 export interface AXNode {
   /** Generated ID (e.g. "ax_1") — assigned by the tree reader, not JXA */
   id: string;
@@ -49,13 +55,13 @@ export interface AXNode {
   enabled: boolean;
   /** Whether the element has keyboard focus */
   focused: boolean;
-  /** Path to reach this element from the app (used for performing actions) */
+  /** Path to reach this element from the app (used for tree display) */
   elementPath: string[];
   /** Child elements in the tree */
   children: AXNode[];
 }
 
-/** Raw element data returned from JXA scripts (before ID assignment) */
+/** Raw element data returned from getAppAccessibilityTree (tree display only) */
 export interface RawAXElement {
   role: string;
   label: string;
@@ -64,6 +70,23 @@ export interface RawAXElement {
   focused: boolean;
   elementPath: string[];
   children: RawAXElement[];
+}
+
+/**
+ * Raw interactive element returned from getInteractiveElements.
+ * Uses flat indexing via window.entireContents() instead of tree paths,
+ * so the stored index can be used to re-access the element reliably.
+ */
+export interface RawInteractiveElement {
+  role: string;
+  label: string;
+  value: string;
+  enabled: boolean;
+  focused: boolean;
+  /** Index of the window (0 = first window) */
+  windowIndex: number;
+  /** Index of this element in window.entireContents() */
+  flatIndex: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +109,6 @@ export function runJxa(script: string): Promise<string> {
   return new Promise((resolve, reject) => {
     log(`[${timestamp()}] [macos-ax] Writing JXA script (${script.length} chars) to ${TEMP_SCRIPT_PATH}`);
 
-    // Write script to temp file — no shell escaping needed
     try {
       writeFileSync(TEMP_SCRIPT_PATH, script, 'utf8');
     } catch (err) {
@@ -131,18 +153,16 @@ export function runJxa(script: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Accessibility Tree Reader
+// Accessibility Tree Reader (for display only)
 // ---------------------------------------------------------------------------
 
 /**
  * Get the accessibility tree of a running application.
- *
- * Uses System Events to walk the UI element hierarchy of the target app.
- * Returns raw tree data (without assigned IDs — those are added by ax-tree.ts).
+ * Returns raw tree data for display (without assigned IDs — those are added by ax-tree.ts).
+ * Tree nodes use elementPath for display but cannot be actioned; use getInteractiveElements for actions.
  *
  * @param appName - The application name (e.g. "TextEdit", "Microsoft Excel")
  * @param maxDepth - Maximum depth to traverse (default 3 to avoid huge trees)
- * @returns Array of raw accessibility tree nodes (one per window)
  */
 export async function getAppAccessibilityTree(appName: string, maxDepth: number = 3): Promise<RawAXElement[]> {
   log(`[${timestamp()}] [macos-ax] Getting accessibility tree for "${appName}" (depth=${maxDepth})`);
@@ -185,10 +205,10 @@ export async function getAppAccessibilityTree(appName: string, maxDepth: number 
     } catch(e) {}
 
     var enabled = true;
-    try { enabled = el.enabled(); } catch(e) {}
+    try { var en = el.enabled(); enabled = en !== false && en !== null; } catch(e) {}
 
     var focused = false;
-    try { focused = el.focused(); } catch(e) {}
+    try { focused = el.focused() === true; } catch(e) {}
 
     var children = [];
     if (depth < MAX_DEPTH) {
@@ -234,14 +254,12 @@ export async function getAppAccessibilityTree(appName: string, maxDepth: number 
 })()
 `;
 
-  log(`[${timestamp()}] [macos-ax] getAppAccessibilityTree script written, executing...`);
+  log(`[${timestamp()}] [macos-ax] getAppAccessibilityTree executing...`);
   const output = await runJxa(script);
 
   try {
     const result = JSON.parse(output);
-    if (result.error) {
-      throw new Error(result.error);
-    }
+    if (result.error) throw new Error(result.error);
     log(`[${timestamp()}] [macos-ax] Tree: ${result.windowCount} windows`);
     return result.windows || [];
   } catch (err) {
@@ -252,16 +270,18 @@ export async function getAppAccessibilityTree(appName: string, maxDepth: number 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Interactive Element Snapshot (flat indexing via entireContents)
+// ---------------------------------------------------------------------------
+
 /**
  * Get a flat list of all interactive elements from an application.
- * This is the raw version — ax-tree.ts wraps this with ref ID assignment.
- *
- * Proven pattern: proc.windows() → win.uiElements() → recurse
+ * Uses window.entireContents() to enumerate ALL elements with a stable flat index.
+ * The flatIndex is stored in the ref→mapping so actions can re-access the same element.
  *
  * @param appName - The application name
- * @returns Array of interactive elements with their paths
  */
-export async function getInteractiveElements(appName: string): Promise<RawAXElement[]> {
+export async function getInteractiveElements(appName: string): Promise<RawInteractiveElement[]> {
   log(`[${timestamp()}] [macos-ax] Getting interactive elements for: "${appName}"`);
 
   const escapedApp = escapeJsString(appName);
@@ -288,10 +308,8 @@ export async function getInteractiveElements(appName: string): Promise<RawAXElem
   var INTERACTIVE_ROLES = [
     "AXButton", "AXTextField", "AXTextArea", "AXCheckBox",
     "AXRadioButton", "AXPopUpButton", "AXComboBox", "AXSlider",
-    "AXMenuItem", "AXMenuBarItem", "AXLink", "AXIncrementor",
-    "AXDisclosureTriangle", "AXTab", "AXTabGroup",
-    "AXCell", "AXColorWell", "AXDateField", "AXList",
-    "AXTable", "AXSheet", "AXToolbar"
+    "AXMenuItem", "AXLink", "AXIncrementor",
+    "AXDisclosureTriangle", "AXTab", "AXColorWell", "AXDateField"
   ];
 
   var elements = [];
@@ -305,23 +323,32 @@ export async function getInteractiveElements(appName: string): Promise<RawAXElem
     return (label && label !== "null") ? String(label) : "";
   }
 
-  function scanElement(el, path, depth) {
-    if (elements.length >= MAX_ELEMENTS || depth > 6) return;
+  for (var w = 0; w < wins.length && elements.length < MAX_ELEMENTS; w++) {
+    // Use entireContents() to get a flat list of ALL elements in the window
+    var allElems = [];
+    try { allElems = wins[w].entireContents(); } catch(e) { continue; }
 
-    var role = "";
-    try { role = el.role(); } catch(e) { return; }
+    for (var i = 0; i < allElems.length && elements.length < MAX_ELEMENTS; i++) {
+      var role = "";
+      try { role = allElems[i].role(); } catch(e) { continue; }
 
-    if (INTERACTIVE_ROLES.indexOf(role) !== -1) {
-      var label = getLabel(el);
+      if (INTERACTIVE_ROLES.indexOf(role) === -1) continue;
+
+      var label = getLabel(allElems[i]);
       var value = "";
       try {
-        var v = el.value();
+        var v = allElems[i].value();
         if (v !== null && v !== undefined && v !== "null") value = String(v);
       } catch(e) {}
+
       var enabled = true;
-      try { enabled = el.enabled(); } catch(e) {}
+      try {
+        var en = allElems[i].enabled();
+        enabled = en !== false && en !== null;
+      } catch(e) {}
+
       var focused = false;
-      try { focused = el.focused(); } catch(e) {}
+      try { focused = allElems[i].focused() === true; } catch(e) {}
 
       elements.push({
         role: role,
@@ -329,39 +356,9 @@ export async function getInteractiveElements(appName: string): Promise<RawAXElem
         value: value.substring(0, 100),
         enabled: enabled,
         focused: focused,
-        elementPath: path,
-        children: []
+        windowIndex: w,
+        flatIndex: i
       });
-    }
-
-    // Recurse into children
-    var kids = [];
-    try { kids = el.uiElements(); } catch(e) { return; }
-    for (var i = 0; i < kids.length && elements.length < MAX_ELEMENTS; i++) {
-      var kidRole = "";
-      try { kidRole = kids[i].role(); } catch(e) {}
-      var kidLabel = getLabel(kids[i]);
-      var seg = kidRole + (kidLabel ? " \\"" + kidLabel + "\\"" : "[" + i + "]");
-      scanElement(kids[i], path.concat([seg]), depth + 1);
-    }
-  }
-
-  // Walk each window's direct uiElements — matches the proven terminal pattern
-  for (var w = 0; w < wins.length; w++) {
-    var winTitle = "";
-    try { winTitle = wins[w].title(); } catch(e) {}
-    if (!winTitle || winTitle === "null") winTitle = "Window " + w;
-    var winPath = ["window \\"" + winTitle + "\\""];
-
-    var winElems = [];
-    try { winElems = wins[w].uiElements(); } catch(e) { continue; }
-
-    for (var i = 0; i < winElems.length; i++) {
-      var elRole = "";
-      try { elRole = winElems[i].role(); } catch(e) {}
-      var elLabel = getLabel(winElems[i]);
-      var seg = elRole + (elLabel ? " \\"" + elLabel + "\\"" : "[" + i + "]");
-      scanElement(winElems[i], winPath.concat([seg]), 1);
     }
   }
 
@@ -369,14 +366,12 @@ export async function getInteractiveElements(appName: string): Promise<RawAXElem
 })()
 `;
 
-  log(`[${timestamp()}] [macos-ax] getInteractiveElements script written, executing...`);
+  log(`[${timestamp()}] [macos-ax] getInteractiveElements executing...`);
   const output = await runJxa(script);
 
   try {
     const result = JSON.parse(output);
-    if (result.error) {
-      throw new Error(result.error);
-    }
+    if (result.error) throw new Error(result.error);
     log(`[${timestamp()}] [macos-ax] Found ${result.elementCount} interactive elements across ${result.windowCount} windows`);
     return result.elements || [];
   } catch (err) {
@@ -388,140 +383,156 @@ export async function getInteractiveElements(appName: string): Promise<RawAXElem
 }
 
 // ---------------------------------------------------------------------------
-// Element Actions
+// Element Actions — flat index approach
 // ---------------------------------------------------------------------------
 
 /**
- * Perform an action on an element located by its path through the accessibility tree.
- *
- * @param appName - The application name
- * @param elementPath - Path to the element (e.g. ['window "Untitled"', 'AXButton "Bold"'])
- * @param action - The accessibility action to perform (e.g. "AXPress", "AXConfirm", "AXRaise")
- * @returns true if the action was performed
+ * Click (press) an element using its flat index in window.entireContents().
+ * Tries AXPress first, falls back to click(), logs which element was targeted.
  */
-export async function performAction(appName: string, elementPath: string[], action: string): Promise<boolean> {
-  log(`[${timestamp()}] [macos-ax] Performing ${action} on ${appName}: ${elementPath.join(' → ')}`);
+export async function clickElementAtIndex(
+  appName: string,
+  windowIndex: number,
+  flatIndex: number
+): Promise<boolean> {
+  log(`[${timestamp()}] [macos-ax] Clicking element in "${appName}" window[${windowIndex}] entireContents[${flatIndex}]`);
 
-  const pathCode = buildPathCode(elementPath);
+  const escapedApp = escapeJsString(appName);
 
   const script = `
 (function() {
-  var se = Application("System Events");
-  var proc = se.processes.byName("${escapeJsString(appName)}");
+  try { Application("${escapedApp}").activate(); delay(0.3); } catch(e) {}
+
+  var sysEvents = Application("System Events");
+  var proc = sysEvents.processes.byName("${escapedApp}");
+  var wins = proc.windows();
+  var win = wins[${windowIndex}];
+  var allElems = win.entireContents();
+  var el = allElems[${flatIndex}];
+
+  var role = "";
+  try { role = el.role(); } catch(e) {}
+  var label = "";
+  try { label = el.title() || el.description() || el.name() || ""; } catch(e) {}
+
+  // Try AXPress first (standard accessibility action)
   try {
-    var el = ${pathCode};
-    el.actions.byName("${escapeJsString(action)}").perform();
-    return "ok";
-  } catch(e) {
-    return "error: " + e.message;
-  }
-})()
-`;
-
-  const output = await runJxa(script);
-  if (output.startsWith('error:')) {
-    throw new Error(output.substring(7).trim());
-  }
-  return true;
-}
-
-/**
- * Click (press) an element by its path.
- *
- * @param appName - The application name
- * @param elementPath - Path to the element
- */
-export async function clickElementByPath(appName: string, elementPath: string[]): Promise<boolean> {
-  log(`[${timestamp()}] [macos-ax] Clicking element in ${appName}: ${elementPath.join(' → ')}`);
-
-  const pathCode = buildPathCode(elementPath);
-
-  const script = `
-(function() {
-  var se = Application("System Events");
-  var proc = se.processes.byName("${escapeJsString(appName)}");
-  try {
-    var el = ${pathCode};
+    el.actions["AXPress"].perform();
+    return JSON.stringify({ ok: true, method: "AXPress", role: role, label: label });
+  } catch(e1) {
+    // Fall back to click()
     try {
       el.click();
-      return "ok";
-    } catch(e1) {
-      try {
-        el.actions.byName("AXPress").perform();
-        return "ok";
-      } catch(e2) {
-        return "error: click failed - " + e1.message + " / AXPress failed - " + e2.message;
-      }
+      return JSON.stringify({ ok: true, method: "click", role: role, label: label });
+    } catch(e2) {
+      return JSON.stringify({ error: "AXPress failed: " + e1.message + " / click failed: " + e2.message, role: role, label: label });
     }
-  } catch(e) {
-    return "error: " + e.message;
   }
 })()
 `;
 
   const output = await runJxa(script);
-  if (output.startsWith('error:')) {
-    throw new Error(output.substring(7).trim());
+  try {
+    const result = JSON.parse(output);
+    log(`[${timestamp()}] [macos-ax] Click result: ${JSON.stringify(result)}`);
+    if (result.error) throw new Error(result.error);
+    return true;
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new Error(`Click failed (bad output): ${output.substring(0, 200)}`);
+    }
+    throw err;
   }
-  return true;
 }
 
 /**
- * Set the value of an element (text field, cell, etc.) by its path.
- *
- * @param appName - The application name
- * @param elementPath - Path to the element
- * @param value - The value to set
+ * Set the value of an element using its flat index.
+ * For text fields/areas tries direct value assignment; falls back to keystroke.
  */
-export async function setElementValueByPath(appName: string, elementPath: string[], value: string): Promise<boolean> {
-  log(`[${timestamp()}] [macos-ax] Setting value in ${appName}: ${elementPath.join(' → ')} = "${value.substring(0, 50)}"`);
+export async function setElementValueAtIndex(
+  appName: string,
+  windowIndex: number,
+  flatIndex: number,
+  value: string
+): Promise<boolean> {
+  log(`[${timestamp()}] [macos-ax] Setting value in "${appName}" window[${windowIndex}] entireContents[${flatIndex}] = "${value.substring(0, 50)}"`);
 
-  const pathCode = buildPathCode(elementPath);
+  const escapedApp = escapeJsString(appName);
+  const escapedValue = escapeJsString(value);
 
   const script = `
 (function() {
-  var se = Application("System Events");
-  var proc = se.processes.byName("${escapeJsString(appName)}");
+  try { Application("${escapedApp}").activate(); delay(0.3); } catch(e) {}
+
+  var sysEvents = Application("System Events");
+  var proc = sysEvents.processes.byName("${escapedApp}");
+  var wins = proc.windows();
+  var win = wins[${windowIndex}];
+  var allElems = win.entireContents();
+  var el = allElems[${flatIndex}];
+
+  var role = "";
+  try { role = el.role(); } catch(e) {}
+  var label = "";
+  try { label = el.title() || el.description() || el.name() || ""; } catch(e) {}
+
+  // Try direct value assignment first
   try {
-    var el = ${pathCode};
+    el.value = "${escapedValue}";
+    return JSON.stringify({ ok: true, method: "set_value", role: role, label: label });
+  } catch(e1) {
+    // Fall back: focus element and use keystroke to type text
     try {
-      el.value = "${escapeJsString(value)}";
-      return "ok";
-    } catch(e1) {
-      try { el.focused = true; } catch(e2) {}
-      return "ok_focused";
+      el.focused = true;
+      delay(0.1);
+      // Select all existing text and replace
+      sysEvents.keystroke("a", { using: "command down" });
+      delay(0.05);
+      sysEvents.keystroke("${escapedValue}");
+      return JSON.stringify({ ok: true, method: "keystroke", role: role, label: label });
+    } catch(e2) {
+      return JSON.stringify({ error: "set_value failed: " + e1.message + " / keystroke failed: " + e2.message, role: role, label: label });
     }
-  } catch(e) {
-    return "error: " + e.message;
   }
 })()
 `;
 
   const output = await runJxa(script);
-  if (output.startsWith('error:')) {
-    throw new Error(output.substring(7).trim());
+  try {
+    const result = JSON.parse(output);
+    log(`[${timestamp()}] [macos-ax] SetValue result: ${JSON.stringify(result)}`);
+    if (result.error) throw new Error(result.error);
+    return true;
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new Error(`SetValue failed (bad output): ${output.substring(0, 200)}`);
+    }
+    throw err;
   }
-  return true;
 }
 
 /**
- * Read a specific attribute of an element.
- *
- * @param appName - The application name
- * @param elementPath - Path to the element
- * @param attribute - Attribute name (e.g. "value", "title", "role", "enabled")
+ * Read an attribute of an element using its flat index.
  */
-export async function getElementAttribute(appName: string, elementPath: string[], attribute: string): Promise<string> {
-  log(`[${timestamp()}] [macos-ax] Getting attribute "${attribute}" from ${appName}: ${elementPath.join(' → ')}`);
+export async function getElementAttributeAtIndex(
+  appName: string,
+  windowIndex: number,
+  flatIndex: number,
+  attribute: string
+): Promise<string> {
+  log(`[${timestamp()}] [macos-ax] Getting "${attribute}" from "${appName}" window[${windowIndex}] entireContents[${flatIndex}]`);
 
-  const pathCode = buildPathCode(elementPath);
+  const escapedApp = escapeJsString(appName);
 
   const script = `
 (function() {
-  var se = Application("System Events");
-  var proc = se.processes.byName("${escapeJsString(appName)}");
+  var sysEvents = Application("System Events");
+  var proc = sysEvents.processes.byName("${escapedApp}");
+  var wins = proc.windows();
+  var win = wins[${windowIndex}];
+  var allElems = win.entireContents();
+  var el = allElems[${flatIndex}];
   try {
-    var el = ${pathCode};
     var val = el.${escapeJsString(attribute)}();
     return (val !== null && val !== undefined) ? String(val) : "";
   } catch(e) {
@@ -538,19 +549,28 @@ export async function getElementAttribute(appName: string, elementPath: string[]
 }
 
 /**
- * Set focus to an element by its path.
+ * Focus an element using its flat index.
  */
-export async function focusElementByPath(appName: string, elementPath: string[]): Promise<boolean> {
-  log(`[${timestamp()}] [macos-ax] Focusing element in ${appName}: ${elementPath.join(' → ')}`);
+export async function focusElementAtIndex(
+  appName: string,
+  windowIndex: number,
+  flatIndex: number
+): Promise<boolean> {
+  log(`[${timestamp()}] [macos-ax] Focusing "${appName}" window[${windowIndex}] entireContents[${flatIndex}]`);
 
-  const pathCode = buildPathCode(elementPath);
+  const escapedApp = escapeJsString(appName);
 
   const script = `
 (function() {
-  var se = Application("System Events");
-  var proc = se.processes.byName("${escapeJsString(appName)}");
+  try { Application("${escapedApp}").activate(); delay(0.1); } catch(e) {}
+
+  var sysEvents = Application("System Events");
+  var proc = sysEvents.processes.byName("${escapedApp}");
+  var wins = proc.windows();
+  var win = wins[${windowIndex}];
+  var allElems = win.entireContents();
+  var el = allElems[${flatIndex}];
   try {
-    var el = ${pathCode};
     el.focused = true;
     return "ok";
   } catch(e) {
@@ -566,6 +586,10 @@ export async function focusElementByPath(appName: string, elementPath: string[])
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// App-level actions (not element-specific)
+// ---------------------------------------------------------------------------
+
 /**
  * Click through a menu path in an application.
  * E.g., ["File", "Save As..."] clicks File menu then Save As... item.
@@ -574,13 +598,10 @@ export async function focusElementByPath(appName: string, elementPath: string[])
  * @param menuPath - Array of menu item labels (e.g. ["File", "Save"])
  */
 export async function clickMenuPath(appName: string, menuPath: string[]): Promise<boolean> {
-  if (menuPath.length === 0) {
-    throw new Error('Menu path cannot be empty');
-  }
+  if (menuPath.length === 0) throw new Error('Menu path cannot be empty');
 
   log(`[${timestamp()}] [macos-ax] Clicking menu in ${appName}: ${menuPath.join(' → ')}`);
 
-  // Build JXA code to navigate through the menu hierarchy
   let menuCode = `proc.menuBars[0].menuBarItems.byName("${escapeJsString(menuPath[0])}")`;
   for (let i = 1; i < menuPath.length; i++) {
     menuCode += `.menus[0].menuItems.byName("${escapeJsString(menuPath[i])}")`;
@@ -602,9 +623,7 @@ export async function clickMenuPath(appName: string, menuPath: string[]): Promis
 `;
 
   const output = await runJxa(script);
-  if (output.startsWith('error:')) {
-    throw new Error(output.substring(7).trim());
-  }
+  if (output.startsWith('error:')) throw new Error(output.substring(7).trim());
   return true;
 }
 
@@ -626,23 +645,19 @@ export async function activateApp(appName: string): Promise<boolean> {
 `;
 
   const output = await runJxa(script);
-  if (output.startsWith('error:')) {
-    throw new Error(output.substring(7).trim());
-  }
+  if (output.startsWith('error:')) throw new Error(output.substring(7).trim());
   return true;
 }
 
 /**
  * Get information about an application's windows.
- *
- * @param appName - The application name
- * @returns Array of window info objects
  */
 export async function getWindowInfo(appName: string): Promise<Array<{ title: string; position: string; size: string }>> {
   log(`[${timestamp()}] [macos-ax] Getting window info for: ${appName}`);
 
   const script = `
 (function() {
+  try { Application("${escapeJsString(appName)}").activate(); delay(0.2); } catch(e) {}
   var se = Application("System Events");
   var proc = se.processes.byName("${escapeJsString(appName)}");
   var wins = [];
@@ -672,13 +687,12 @@ export async function getWindowInfo(appName: string): Promise<Array<{ title: str
 }
 
 // ---------------------------------------------------------------------------
-// Internal Helpers
+// Internal helpers
 // ---------------------------------------------------------------------------
 
 /**
  * Escape a string for safe inclusion as a JavaScript string literal.
  * Used when embedding values directly in JXA scripts written to a file.
- * No shell escaping needed since the script is passed via a temp file.
  */
 function escapeJsString(str: string): string {
   return str
@@ -687,89 +701,4 @@ function escapeJsString(str: string): string {
     .replace(/\n/g, '\\n')
     .replace(/\r/g, '\\r')
     .replace(/\t/g, '\\t');
-}
-
-/**
- * Build JXA code to navigate to an element via its path.
- *
- * Path entries look like:
- *   'window "Untitled"'     → proc.windows.byName('Untitled')
- *   'AXButton "Bold"'       → .buttons.byName('Bold')
- *   'AXTextField[2]'        → .textFields[2]
- */
-function buildPathCode(elementPath: string[]): string {
-  let code = 'proc';
-
-  for (const segment of elementPath) {
-    // Parse: role "label"
-    const quoteMatch = segment.match(/^(\S+)\s+"(.+)"$/);
-    // Parse: role[index]
-    const bracketMatch = segment.match(/^(\S+)\[(\d+)\]$/);
-    // Parse: window "name"
-    const windowMatch = segment.match(/^window\s+"(.+)"$/);
-
-    if (windowMatch) {
-      code += `.windows.byName("${escapeJsString(windowMatch[1])}")`;
-    } else if (quoteMatch) {
-      const [, role, label] = quoteMatch;
-      const accessor = roleToAccessor(role);
-      code += `.${accessor}.byName("${escapeJsString(label)}")`;
-    } else if (bracketMatch) {
-      const [, role, index] = bracketMatch;
-      const accessor = roleToAccessor(role);
-      code += `.${accessor}[${index}]`;
-    } else if (segment === 'window') {
-      code += '.windows[0]';
-    } else {
-      code += `.uiElements.byName("${escapeJsString(segment)}")`;
-    }
-  }
-
-  return code;
-}
-
-/**
- * Map an AX role to the JXA accessor name.
- * E.g., "AXButton" → "buttons", "AXTextField" → "textFields"
- */
-function roleToAccessor(role: string): string {
-  const map: Record<string, string> = {
-    'AXWindow': 'windows',
-    'AXButton': 'buttons',
-    'AXTextField': 'textFields',
-    'AXTextArea': 'textAreas',
-    'AXCheckBox': 'checkboxes',
-    'AXRadioButton': 'radioButtons',
-    'AXPopUpButton': 'popUpButtons',
-    'AXComboBox': 'comboBoxes',
-    'AXSlider': 'sliders',
-    'AXMenuItem': 'menuItems',
-    'AXMenuBarItem': 'menuBarItems',
-    'AXMenu': 'menus',
-    'AXMenuBar': 'menuBars',
-    'AXToolbar': 'toolbars',
-    'AXGroup': 'groups',
-    'AXScrollArea': 'scrollAreas',
-    'AXTable': 'tables',
-    'AXRow': 'rows',
-    'AXColumn': 'columns',
-    'AXCell': 'cells',
-    'AXStaticText': 'staticTexts',
-    'AXImage': 'images',
-    'AXLink': 'links',
-    'AXList': 'lists',
-    'AXTabGroup': 'tabGroups',
-    'AXTab': 'tabs',
-    'AXSheet': 'sheets',
-    'AXSplitGroup': 'splitGroups',
-    'AXSplitter': 'splitters',
-    'AXDisclosureTriangle': 'disclosureTriangles',
-    'AXIncrementor': 'incrementors',
-    'AXColorWell': 'colorWells',
-    'AXOutline': 'outlines',
-    'AXBrowser': 'browsers',
-    'window': 'windows',
-  };
-
-  return map[role] || 'uiElements';
 }

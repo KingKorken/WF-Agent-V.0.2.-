@@ -10,10 +10,10 @@
 
 import { getPathForRef } from './ax-tree';
 import {
-  clickElementByPath,
-  setElementValueByPath,
-  getElementAttribute,
-  focusElementByPath,
+  clickElementAtIndex,
+  setElementValueAtIndex,
+  getElementAttributeAtIndex,
+  focusElementAtIndex,
   clickMenuPath,
   activateApp as macosActivateApp,
   getWindowInfo as macosGetWindowInfo,
@@ -52,7 +52,7 @@ export async function clickElement(ref: string): Promise<AXActionResult> {
   }
 
   try {
-    await clickElementByPath(mapping.appName, mapping.elementPath);
+    await clickElementAtIndex(mapping.appName, mapping.windowIndex, mapping.flatIndex);
     return { success: true, data: { action: 'click', ref } };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -76,7 +76,7 @@ export async function setElementValue(ref: string, value: string): Promise<AXAct
   }
 
   try {
-    await setElementValueByPath(mapping.appName, mapping.elementPath, value);
+    await setElementValueAtIndex(mapping.appName, mapping.windowIndex, mapping.flatIndex, value);
     return { success: true, data: { action: 'set_value', ref, value } };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -100,7 +100,7 @@ export async function getElementValue(ref: string): Promise<AXActionResult> {
   }
 
   try {
-    const value = await getElementAttribute(mapping.appName, mapping.elementPath, 'value');
+    const value = await getElementAttributeAtIndex(mapping.appName, mapping.windowIndex, mapping.flatIndex, 'value');
     return { success: true, data: { ref, value } };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -124,7 +124,7 @@ export async function focusElement(ref: string): Promise<AXActionResult> {
   }
 
   try {
-    await focusElementByPath(mapping.appName, mapping.elementPath);
+    await focusElementAtIndex(mapping.appName, mapping.windowIndex, mapping.flatIndex);
     return { success: true, data: { action: 'focus', ref } };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
