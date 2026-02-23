@@ -9,7 +9,9 @@
     "test-server": "npm run build --workspace=@workflow-agent/shared && tsc && node dist/test/test-server.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "@workflow-agent/shared": "*",
+    "dotenv": "^16.4.0",
     "playwright": "^1.40.0",
     "ws": "^8.16.0"
   },

@@ -23,4 +23,4 @@ export const RECONNECT_MAX_DELAY_MS = 30_000;       // 30 seconds
 export const RECONNECT_BACKOFF_MULTIPLIER = 2;
 
 /** Supported command layers in the current build */
-export const SUPPORTED_LAYERS = ['shell', 'cdp', 'accessibility'] as const;
+export const SUPPORTED_LAYERS = ['shell', 'cdp', 'accessibility', 'vision'] as const;

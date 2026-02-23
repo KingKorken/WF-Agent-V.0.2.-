@@ -203,20 +203,154 @@ export interface AXSnapshotElement {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 5 — Vision-Based (Last Resort)
+// Layer 5 — Vision-Based (Hybrid — Last Resort)
 // ---------------------------------------------------------------------------
 
-export interface VisionScreenshotParams {
-  /** No params needed — captures the full screen */
+/** All vision layer actions */
+export type VisionAction =
+  | 'screenshot'
+  | 'collect_context'
+  | 'click_coordinates'
+  | 'double_click'
+  | 'right_click'
+  | 'type_text'
+  | 'key_combo'
+  | 'drag'
+  | 'scroll'
+  | 'capture_region';
+
+/** Screenshot result returned by capture functions */
+export interface ScreenshotResult {
+  base64: string;
+  width: number;
+  height: number;
+  imagePath?: string;
+  captureType: 'fullscreen' | 'window' | 'region';
+  timestamp: string;
 }
 
-export interface VisionClickCoordinatesParams {
+/** Partial accessibility element (best-effort data from Layer 4) */
+export interface PartialAXElement {
+  role: string;
+  label: string;
+  value?: string;
+  position?: [number, number];  // [x, y] if available
+  size?: [number, number];      // [width, height] if available
+}
+
+/** Full hybrid vision context — the signature data structure of Layer 5 */
+export interface VisionContext {
+  screenshot: {
+    base64: string;
+    width: number;
+    height: number;
+    captureType: 'fullscreen' | 'window' | 'region';
+  };
+  windowInfo: {
+    frontmostApp: string;
+    windowTitle: string;
+    windowBounds: { x: number; y: number; width: number; height: number };
+    screenSize: { width: number; height: number };
+  };
+  partialAccessibility: {
+    available: boolean;
+    menuBarItems: string[];
+    visibleLabels: string[];
+    focusedElement: { role: string; label: string; value: string } | null;
+    elementCount: number;
+    rawElements: PartialAXElement[];
+  };
+  recentActions: Array<{
+    action: string;
+    result: string;
+    timestamp: string;
+  }>;
+  taskContext: {
+    currentStep: string;
+    expectedOutcome: string;
+    workflowName: string;
+  } | null;
+}
+
+/** Vision action result */
+export interface VisionActionResult {
+  success: boolean;
+  action: string;
+  timestamp: string;
+  error?: string;
+  verificationScreenshot?: {
+    base64: string;
+    width: number;
+    height: number;
+  };
+}
+
+/** Params for vision screenshot */
+export interface VisionScreenshotParams {
+  app?: string;
+}
+
+/** Params for collect_context */
+export interface VisionCollectContextParams {
+  app?: string;
+  taskContext?: {
+    currentStep: string;
+    expectedOutcome: string;
+    workflowName: string;
+  };
+}
+
+/** Params for click/double_click/right_click */
+export interface VisionClickParams {
   x: number;
   y: number;
+  verify?: boolean;
 }
 
-export type VisionAction = 'screenshot' | 'click_coordinates';
-export type VisionParams = VisionScreenshotParams | VisionClickCoordinatesParams;
+/** Params for type_text */
+export interface VisionTypeParams {
+  text: string;
+}
+
+/** Params for key_combo */
+export interface VisionKeyComboParams {
+  keys: string[];
+}
+
+/** Params for drag */
+export interface VisionDragParams {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+}
+
+/** Params for scroll */
+export interface VisionScrollParams {
+  x: number;
+  y: number;
+  direction: 'up' | 'down' | 'left' | 'right';
+  amount: number;
+}
+
+/** Params for capture_region */
+export interface VisionCaptureRegionParams {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Union of all vision params */
+export type VisionParams =
+  | VisionScreenshotParams
+  | VisionCollectContextParams
+  | VisionClickParams
+  | VisionTypeParams
+  | VisionKeyComboParams
+  | VisionDragParams
+  | VisionScrollParams
+  | VisionCaptureRegionParams;
 
 // ---------------------------------------------------------------------------
 // System Commands (cross-layer utilities)

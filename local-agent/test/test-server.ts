@@ -33,7 +33,18 @@
  *   ax menu <app> <items...>   — Click through menus (e.g. "ax menu TextEdit File Save")
  *   ax focus <ref>             — Focus an element
  *   ax windows <appname>       — Show window info
- *   screenshot                 — Request a vision screenshot (not implemented)
+ *   vision screenshot [app]    — Take a screenshot (fullscreen or specific app window)
+ *   vision context [app]       — Collect full hybrid context (screenshot + AX + metadata)
+ *   vision click <x> <y> [verify] — Click at screen coordinates
+ *   vision doubleclick <x> <y> — Double-click at coordinates
+ *   vision rightclick <x> <y>  — Right-click at coordinates
+ *   vision type <text>         — Type text into focused element
+ *   vision key <key1> <key2>...— Keyboard shortcut (e.g. "vision key cmd s")
+ *   vision drag <x1> <y1> <x2> <y2> — Drag between points
+ *   vision scroll <x> <y> <dir> <n> — Scroll at position (e.g. "vision scroll 400 300 down 3")
+ *   vision region <x> <y> <w> <h>  — Capture a specific screen region
+ *   batch <cmd1> | <cmd2> | ...— Run multiple commands sequentially with delay
+ *   agent <goal>               — Start the autonomous agent loop with a goal
  *   help                       — Show available commands
  *   quit                       — Stop the test server
  *
@@ -45,7 +56,27 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import * as readline from 'readline';
-import { DEFAULT_WS_PORT, AgentCommand } from '@workflow-agent/shared';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+import { DEFAULT_WS_PORT, AgentCommand, AgentResult } from '@workflow-agent/shared';
+
+// Load .env — try repo root first (compiled JS is at local-agent/dist/test/test-server.js,
+// so ../../../ goes up to the repo root), then fall back to other locations
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+if (!process.env.ANTHROPIC_API_KEY) {
+  dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+}
+if (!process.env.ANTHROPIC_API_KEY) {
+  dotenv.config(); // cwd fallback
+}
+
+// Agent loop modules (imported after dotenv so env vars are available)
+import { initLLMClient, sendMessage, resetConversation } from '../src/agent/llm-client';
+import type { ConversationMessage } from '../src/agent/llm-client';
+import { observe } from '../src/agent/observer';
+import type { Observation } from '../src/agent/observer';
+import { buildSystemPrompt, formatObservation } from '../src/agent/prompt-builder';
+import { parseResponse } from '../src/agent/response-parser';
 
 /** Timestamp prefix for log messages */
 function timestamp(): string {
@@ -57,6 +88,18 @@ let commandCounter = 0;
 
 /** Reference to the connected agent (null if no agent is connected) */
 let agentSocket: WebSocket | null = null;
+
+/** Batch mode state */
+let batchQueue: string[] = [];     // Queued commands (raw strings, same format as interactive input)
+let batchDelayMs: number = 1000;  // Delay between commands
+let batchTotal: number = 0;       // Total commands in current batch
+let batchCompleted: number = 0;   // Commands completed so far
+let batchActive: boolean = false; // Whether a batch is currently running
+
+/** Agent loop state */
+const pendingCommands: Map<string, (result: AgentResult) => void> = new Map();
+let agentLoopActive: boolean = false;
+let agentCommandCounter: number = 0;
 
 // ---------------------------------------------------------------------------
 // Start the WebSocket server
@@ -91,6 +134,13 @@ wss.on('connection', (ws: WebSocket) => {
       }
 
       if (msg.type === 'result') {
+        // If the agent loop is waiting for this response, deliver it directly
+        const pendingHandler = pendingCommands.get(msg.id);
+        if (pendingHandler) {
+          pendingHandler(msg as AgentResult);
+          if (agentLoopActive) return; // suppress normal output during agent loop
+        }
+
         // Command result from the agent
         console.log('');
         console.log(`  ← Response [${msg.id}] (${msg.status}):`);
@@ -138,7 +188,46 @@ wss.on('connection', (ws: WebSocket) => {
           for (const tab of responseData.tabs as Array<Record<string, unknown>>) {
             console.log(`       [${tab.index}] ${tab.title || '(untitled)'} — ${tab.url}`);
           }
-        // Special formatting for screenshot (just show size, not the base64 blob)
+        // Vision: collect_context result — check BEFORE CDP screenshot (both use responseData.screenshot)
+        } else if (responseData.screenshot && typeof responseData.screenshot === 'object' && responseData.windowInfo) {
+          const ctx = responseData as Record<string, unknown>;
+          const win = ctx.windowInfo as Record<string, unknown>;
+          const ax = ctx.partialAccessibility as Record<string, unknown>;
+          const recent = ctx.recentActions as unknown[];
+          const ss = ctx.screenshot as Record<string, unknown>;
+          const sizeKb = Math.round(String(ss.base64 || '').length / 1024);
+          console.log(`     App: ${win.frontmostApp}  Window: "${win.windowTitle}"`);
+          console.log(`     Screenshot: ${ss.width}×${ss.height} (${sizeKb}KB, ${ss.captureType})`);
+          const menuItems = (ax.menuBarItems as string[]).join(', ') || '(none)';
+          console.log(`     AX elements: ${ax.elementCount}  Menu items: ${menuItems}`);
+          console.log(`     Recent actions: ${(recent).length}`);
+          if ((recent as Array<Record<string, unknown>>).length > 0) {
+            for (const a of recent as Array<Record<string, unknown>>) {
+              console.log(`       • ${a.action} → ${a.result}`);
+            }
+          }
+          if (ctx.taskContext) {
+            const tc = ctx.taskContext as Record<string, unknown>;
+            console.log(`     Task: "${tc.currentStep}" (${tc.workflowName})`);
+          }
+        // Vision: direct screenshot/region result (base64 at top level with captureType)
+        } else if (responseData.base64 && responseData.captureType) {
+          const sizeKb = Math.round(String(responseData.base64).length / 1024);
+          console.log(`     Screenshot: ${responseData.width}×${responseData.height} (${sizeKb}KB base64, type: ${responseData.captureType})`);
+          console.log(`     Timestamp: ${responseData.timestamp}`);
+        // Vision: action result (click/type/key/drag/scroll)
+        } else if (responseData.action && responseData.timestamp && typeof responseData.success === 'boolean') {
+          const ok = responseData.success ? 'OK' : 'FAIL';
+          console.log(`     [${ok}] ${responseData.action}`);
+          if (responseData.error) {
+            console.log(`     Error: ${responseData.error}`);
+          }
+          if (responseData.verificationScreenshot) {
+            const vs = responseData.verificationScreenshot as Record<string, unknown>;
+            const sizeKb = Math.round(String(vs.base64 || '').length / 1024);
+            console.log(`     Verification screenshot: ${vs.width}×${vs.height} (${sizeKb}KB)`);
+          }
+        // Special formatting for CDP screenshot (just show size, not the base64 blob)
         } else if (responseData.screenshot) {
           const size = Math.round(String(responseData.screenshot).length / 1024);
           console.log(`     Screenshot captured (${size}KB base64, format: ${responseData.format})`);
@@ -151,7 +240,11 @@ wss.on('connection', (ws: WebSocket) => {
           }
         }
         console.log('');
-        showPrompt();
+        if (batchActive) {
+          processBatchNext();
+        } else {
+          showPrompt();
+        }
         return;
       }
 
@@ -188,6 +281,32 @@ function showPrompt(): void {
   const status = agentSocket ? '●' : '○';
   rl.setPrompt(`${status} test-server> `);
   rl.prompt();
+}
+
+/**
+ * Send a command to the Local Agent and wait for its response.
+ * Used by the agent loop for synchronous-style command execution.
+ */
+function sendCommandAndWait(command: AgentCommand, timeoutMs: number = 30000): Promise<AgentResult> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingCommands.delete(command.id);
+      reject(new Error(`Command ${command.id} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    pendingCommands.set(command.id, (result: AgentResult) => {
+      clearTimeout(timer);
+      pendingCommands.delete(command.id);
+      resolve(result);
+    });
+
+    const sent = sendCommand(command);
+    if (!sent) {
+      clearTimeout(timer);
+      pendingCommands.delete(command.id);
+      reject(new Error('Failed to send command — agent not connected'));
+    }
+  });
 }
 
 function showHelp(): void {
@@ -228,9 +347,31 @@ function showHelp(): void {
   console.log('  ax focus <ref>                 Focus an element');
   console.log('  ax windows <appname>           Show window info');
   console.log('');
+  console.log('  Vision commands (Layer 5 — Hybrid Last Resort):');
+  console.log('  ──────────────────────────────────────────────');
+  console.log('  vision screenshot [app]        Take a screenshot (fullscreen or app window)');
+  console.log('  vision context [app]           Collect hybrid context (screenshot + AX + metadata)');
+  console.log('  vision click <x> <y> [verify]  Click at screen coordinates');
+  console.log('  vision doubleclick <x> <y>     Double-click at coordinates');
+  console.log('  vision rightclick <x> <y>      Right-click at coordinates');
+  console.log('  vision type <text>             Type text into focused element');
+  console.log('  vision key <keys...>           Keyboard shortcut (e.g. "vision key cmd s")');
+  console.log('  vision drag <x1> <y1> <x2> <y2>  Drag between points');
+  console.log('  vision scroll <x> <y> <dir> <n>  Scroll at position');
+  console.log('  vision region <x> <y> <w> <h>    Capture a screen region');
+  console.log('');
+  console.log('  Batch Mode:');
+  console.log('  ──────────────────────────────────────────────');
+  console.log('  batch <cmd1> | <cmd2> | ...    Run commands sequentially (1s delay between each)');
+  console.log('  batch <ms> <cmd1> | <cmd2>     Custom delay (e.g. "batch 2000 switch TextEdit | vision click 400 300")');
+  console.log('');
+  console.log('  Agent Loop (requires ANTHROPIC_API_KEY in .env):');
+  console.log('  ──────────────────────────────────────────────');
+  console.log('  agent <goal>               Start autonomous agent with a goal');
+  console.log('                             Example: agent Open TextEdit and type "Hello World"');
+  console.log('');
   console.log('  Other:');
   console.log('  ──────────────────────────────────────────────');
-  console.log('  screenshot                 Vision screenshot (not implemented)');
   console.log('  help                       Show this help message');
   console.log('  quit                       Stop the test server');
   console.log('');
@@ -256,6 +397,33 @@ function sendCommand(command: AgentCommand): boolean {
 function nextId(): string {
   commandCounter++;
   return `cmd_${commandCounter}`;
+}
+
+/**
+ * Execute the next command in the batch queue.
+ * Called after each command's response arrives when batchActive is true.
+ */
+function processBatchNext(): void {
+  if (batchQueue.length === 0) {
+    // Batch complete
+    console.log('');
+    console.log(`  ═══ BATCH COMPLETE (${batchCompleted}/${batchTotal} commands) ═══`);
+    console.log('');
+    batchActive = false;
+    batchTotal = 0;
+    batchCompleted = 0;
+    showPrompt();
+    return;
+  }
+
+  const nextCmd = batchQueue.shift()!;
+  batchCompleted++;
+  console.log(`  ── Batch [${batchCompleted}/${batchTotal}]: ${nextCmd}`);
+
+  // Wait the configured delay, then feed the command through the normal parser
+  setTimeout(() => {
+    rl.emit('line', nextCmd);
+  }, batchDelayMs);
 }
 
 // Handle user input
@@ -373,15 +541,94 @@ rl.on('line', (input: string) => {
       handleAxCommand(arg);
       break;
 
-    case 'screenshot':
-      sendCommand({
-        type: 'command',
-        id: nextId(),
-        layer: 'vision',
-        action: 'screenshot',
-        params: {},
+    case 'vision':
+      handleVisionCommand(arg);
+      break;
+
+    case 'batch': {
+      if (!arg) {
+        console.log('  Usage: batch [delay_ms] <cmd1> | <cmd2> | <cmd3>');
+        console.log('  Example: batch switch TextEdit | vision click 400 300 | vision type Hello');
+        console.log('  Example: batch 2000 switch TextEdit | vision click 400 300');
+        showPrompt();
+        break;
+      }
+
+      // Check if the first word of arg is a plain number (delay in ms)
+      // Must be checked BEFORE splitting by | so "1500 switch TextEdit | ..." works correctly
+      batchDelayMs = 1000;
+      let cmdString = arg;
+      const firstWord = arg.split(/\s+/)[0];
+      if (/^\d+$/.test(firstWord)) {
+        batchDelayMs = parseInt(firstWord, 10);
+        cmdString = arg.substring(firstWord.length).trimStart();
+      }
+
+      // Split remaining string by pipe and trim each command
+      const rawParts = cmdString.split('|').map((s) => s.trim()).filter((s) => s.length > 0);
+
+      if (rawParts.length === 0) {
+        console.log('  No commands found. Separate commands with |');
+        showPrompt();
+        break;
+      }
+
+      const batchCmds = rawParts;
+
+      if (batchCmds.length === 0) {
+        console.log('  No commands found after delay value.');
+        showPrompt();
+        break;
+      }
+
+      // Set up batch state
+      batchQueue = batchCmds.slice(); // copy
+      batchTotal = batchCmds.length;
+      batchCompleted = 0;
+      batchActive = true;
+
+      // Print the plan
+      console.log('');
+      console.log(`  ═══ BATCH MODE (${batchTotal} commands, ${batchDelayMs}ms delay) ═══`);
+      batchCmds.forEach((c, i) => {
+        console.log(`    ${i + 1}. ${c}`);
+      });
+      console.log('  ═══ Starting... ═══');
+      console.log('');
+
+      // Kick off the first command
+      processBatchNext();
+      break;
+    }
+
+    case 'agent': {
+      if (!arg) {
+        console.log('  Usage: agent <goal>');
+        console.log('  Example: agent Open TextEdit and type "Hello World"');
+        showPrompt();
+        break;
+      }
+
+      if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+        console.log('  Error: No agent connected. Start the agent first (npm run agent:dev)');
+        showPrompt();
+        break;
+      }
+
+      if (!process.env.ANTHROPIC_API_KEY) {
+        console.log('  Error: ANTHROPIC_API_KEY not found.');
+        console.log('  Create a .env file at the repo root with: ANTHROPIC_API_KEY=sk-ant-...');
+        showPrompt();
+        break;
+      }
+
+      runAgentLoop(arg).catch((err: Error) => {
+        console.log(`\n  ✗ Agent loop error: ${err.message}`);
+        agentLoopActive = false;
+        showPrompt();
       });
       break;
+    }
 
     default:
       console.log(`  Unknown command: "${cmd}". Type "help" for available commands.`);
@@ -666,6 +913,392 @@ function handleAxCommand(args: string): void {
       showPrompt();
       break;
   }
+}
+
+/**
+ * Handle "vision <subcommand>" commands.
+ * Parses the subcommand and sends the appropriate Layer 5 vision command.
+ */
+function handleVisionCommand(args: string): void {
+  const parts = args.trim().split(/\s+/);
+  const subCmd = parts[0] || '';
+  const rest = parts.slice(1);
+
+  switch (subCmd) {
+    case 'screenshot': {
+      const app = rest.join(' ') || undefined;
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'screenshot',
+        params: app ? { app } : {},
+      });
+      break;
+    }
+
+    case 'context': {
+      const app = rest.join(' ') || undefined;
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'collect_context',
+        params: app ? { app } : {},
+      });
+      break;
+    }
+
+    case 'click': {
+      const x = parseInt(rest[0], 10);
+      const y = parseInt(rest[1], 10);
+      const verify = rest[2] === 'verify';
+      if (isNaN(x) || isNaN(y)) {
+        console.log('  Usage: vision click <x> <y> [verify]');
+        showPrompt();
+        return;
+      }
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'click_coordinates',
+        params: { x, y, verify },
+      });
+      break;
+    }
+
+    case 'doubleclick': {
+      const x = parseInt(rest[0], 10);
+      const y = parseInt(rest[1], 10);
+      if (isNaN(x) || isNaN(y)) {
+        console.log('  Usage: vision doubleclick <x> <y>');
+        showPrompt();
+        return;
+      }
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'double_click',
+        params: { x, y },
+      });
+      break;
+    }
+
+    case 'rightclick': {
+      const x = parseInt(rest[0], 10);
+      const y = parseInt(rest[1], 10);
+      if (isNaN(x) || isNaN(y)) {
+        console.log('  Usage: vision rightclick <x> <y>');
+        showPrompt();
+        return;
+      }
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'right_click',
+        params: { x, y },
+      });
+      break;
+    }
+
+    case 'type': {
+      const text = rest.join(' ');
+      if (!text) {
+        console.log('  Usage: vision type <text>');
+        showPrompt();
+        return;
+      }
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'type_text',
+        params: { text },
+      });
+      break;
+    }
+
+    case 'key': {
+      if (rest.length === 0) {
+        console.log('  Usage: vision key <key1> <key2>... (e.g. "vision key cmd s")');
+        showPrompt();
+        return;
+      }
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'key_combo',
+        params: { keys: rest },
+      });
+      break;
+    }
+
+    case 'drag': {
+      const fromX = parseInt(rest[0], 10);
+      const fromY = parseInt(rest[1], 10);
+      const toX = parseInt(rest[2], 10);
+      const toY = parseInt(rest[3], 10);
+      if (isNaN(fromX) || isNaN(fromY) || isNaN(toX) || isNaN(toY)) {
+        console.log('  Usage: vision drag <fromX> <fromY> <toX> <toY>');
+        showPrompt();
+        return;
+      }
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'drag',
+        params: { fromX, fromY, toX, toY },
+      });
+      break;
+    }
+
+    case 'scroll': {
+      const x = parseInt(rest[0], 10);
+      const y = parseInt(rest[1], 10);
+      const direction = rest[2] as 'up' | 'down' | 'left' | 'right';
+      const amount = parseInt(rest[3], 10) || 3;
+      if (isNaN(x) || isNaN(y) || !direction) {
+        console.log('  Usage: vision scroll <x> <y> <up|down|left|right> [amount]');
+        showPrompt();
+        return;
+      }
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'scroll',
+        params: { x, y, direction, amount },
+      });
+      break;
+    }
+
+    case 'region': {
+      const x = parseInt(rest[0], 10);
+      const y = parseInt(rest[1], 10);
+      const w = parseInt(rest[2], 10);
+      const h = parseInt(rest[3], 10);
+      if (isNaN(x) || isNaN(y) || isNaN(w) || isNaN(h)) {
+        console.log('  Usage: vision region <x> <y> <width> <height>');
+        showPrompt();
+        return;
+      }
+      sendCommand({
+        type: 'command',
+        id: nextId(),
+        layer: 'vision',
+        action: 'capture_region',
+        params: { x, y, width: w, height: h },
+      });
+      break;
+    }
+
+    default:
+      console.log(`  Unknown vision subcommand: "${subCmd}"`);
+      console.log('  Available: screenshot, context, click, doubleclick, rightclick, type, key, drag, scroll, region');
+      showPrompt();
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent Loop
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the autonomous agent loop.
+ * Observes the screen, sends observations to Claude, executes Claude's decisions.
+ * Repeats until the goal is achieved, max iterations reached, or an error occurs.
+ */
+async function runAgentLoop(goal: string): Promise<void> {
+  const maxIterations = parseInt(process.env.AGENT_MAX_ITERATIONS || '25', 10);
+  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+
+  console.log('');
+  console.log('  ╔════════════════════════════════════════════════════════╗');
+  console.log('  ║              AGENT LOOP STARTING                       ║');
+  console.log('  ╠════════════════════════════════════════════════════════╣');
+  const goalLine = goal.substring(0, 48).padEnd(48);
+  console.log(`  ║ Goal: ${goalLine} ║`);
+  const modelLine = model.substring(0, 47).padEnd(47);
+  console.log(`  ║ Model: ${modelLine} ║`);
+  const iterLine = String(maxIterations).padEnd(46);
+  console.log(`  ║ Max iterations: ${iterLine} ║`);
+  console.log('  ╚════════════════════════════════════════════════════════╝');
+  console.log('');
+
+  agentLoopActive = true;
+  agentCommandCounter = 0;
+
+  try {
+    initLLMClient();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`  ✗ Failed to initialize LLM: ${msg}`);
+    agentLoopActive = false;
+    showPrompt();
+    return;
+  }
+
+  resetConversation();
+
+  const systemPrompt = buildSystemPrompt();
+  const conversationHistory: ConversationMessage[] = [];
+  let browserActive = false;
+
+  for (let step = 1; step <= maxIterations; step++) {
+    console.log(`  ┌─── Step ${step}/${maxIterations} ${'─'.repeat(44 - String(step).length - String(maxIterations).length)}┐`);
+
+    // === OBSERVE ===
+    console.log('  │ Observing...');
+    let observation: Observation;
+    try {
+      observation = await observe(sendCommandAndWait, browserActive);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  │ ✗ Observation failed: ${msg}`);
+      console.log('  └──────────────────────────────────────────────────────┘');
+      break;
+    }
+
+    console.log(`  │ Screenshot: ${observation.screenshotSize.width}×${observation.screenshotSize.height}`);
+    console.log(`  │ App: ${observation.frontmostApp} — "${observation.windowTitle}"`);
+    const elemCount = observation.browserElements?.length ?? observation.desktopElements?.length ?? 0;
+    console.log(`  │ Data: ${observation.availableLayer} (${elemCount} elements)`);
+
+    // === BUILD MESSAGE ===
+    const userMessage = formatObservation(observation, goal, step);
+    conversationHistory.push(userMessage);
+
+    // === DECIDE ===
+    console.log('  │ Thinking...');
+    let responseText: string;
+    try {
+      responseText = await sendMessage(systemPrompt, conversationHistory);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  │ ✗ LLM call failed: ${msg}`);
+      console.log('  └──────────────────────────────────────────────────────┘');
+      break;
+    }
+
+    // Add assistant response to history
+    conversationHistory.push({ role: 'assistant', content: responseText });
+
+    // === PARSE RESPONSE ===
+    agentCommandCounter++;
+    const parsed = parseResponse(responseText, agentCommandCounter);
+
+    if (parsed.type === 'complete') {
+      console.log(`  │ ${parsed.thinking}`);
+      console.log('  │');
+      console.log('  │ GOAL ACHIEVED');
+      console.log(`  │ ${parsed.summary}`);
+      console.log('  └──────────────────────────────────────────────────────┘');
+      console.log('');
+      console.log('  ╔════════════════════════════════════════════════════════╗');
+      console.log(`  ║ AGENT COMPLETE — ${step} step${step === 1 ? ' ' : 's'} ${'─'.repeat(34 - String(step).length)}║`);
+      console.log('  ╚════════════════════════════════════════════════════════╝');
+      console.log('');
+      agentLoopActive = false;
+      showPrompt();
+      return;
+    }
+
+    if (parsed.type === 'needs_help') {
+      console.log(`  │ ${parsed.thinking}`);
+      console.log('  │');
+      console.log(`  │ Agent needs help: ${parsed.question}`);
+      console.log('  └──────────────────────────────────────────────────────┘');
+      console.log('');
+      console.log('  Agent paused. Restart with "agent <goal>" and provide more context.');
+      agentLoopActive = false;
+      showPrompt();
+      return;
+    }
+
+    if (parsed.type === 'error') {
+      console.log(`  │ Parse error: ${parsed.error}`);
+      console.log(`  │ Raw (first 200): ${parsed.rawResponse.substring(0, 200)}`);
+      console.log('  └──────────────────────────────────────────────────────┘');
+      // Don't break — add a clarification and retry
+      conversationHistory.push({
+        role: 'user',
+        content:
+          'Your previous response was not valid JSON. Respond with EXACTLY ONE JSON object — no markdown, no backticks, no extra text.',
+      });
+      continue;
+    }
+
+    if (parsed.type === 'action') {
+      console.log(`  │ ${parsed.thinking}`);
+      console.log(`  │ Action: ${parsed.command.layer}/${parsed.command.action}`);
+
+      // Show params (truncate large values like base64)
+      const displayParams: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(parsed.command.params)) {
+        displayParams[k] = typeof v === 'string' && v.length > 100
+          ? `${v.substring(0, 50)}...(${v.length} chars)`
+          : v;
+      }
+      if (Object.keys(displayParams).length > 0) {
+        console.log(`  │ Params: ${JSON.stringify(displayParams).substring(0, 150)}`);
+      }
+
+      // Track browser state
+      if (parsed.command.layer === 'cdp' && parsed.command.action === 'launch') {
+        browserActive = true;
+      }
+      if (parsed.command.layer === 'cdp' && parsed.command.action === 'close') {
+        browserActive = false;
+      }
+
+      // === ACT ===
+      console.log('  │ Executing...');
+      let result: AgentResult;
+      try {
+        result = await sendCommandAndWait(parsed.command);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`  │ ✗ Execution failed: ${msg}`);
+        console.log('  └──────────────────────────────────────────────────────┘');
+        conversationHistory.push({
+          role: 'user',
+          content: `The action failed with error: ${msg}. What should we try instead?`,
+        });
+        continue;
+      }
+
+      const statusMark = result.status === 'success' ? '✓' : '✗';
+      console.log(`  │ ${statusMark} Result: ${result.status}`);
+
+      // Show result data (truncate large values)
+      const displayData: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(result.data)) {
+        displayData[k] = typeof v === 'string' && v.length > 200
+          ? `(${Math.round(v.length / 1024)}KB data)`
+          : v;
+      }
+      console.log(`  │ Data: ${JSON.stringify(displayData).substring(0, 150)}`);
+      console.log('  └──────────────────────────────────────────────────────┘');
+
+      // Let the UI settle before the next observation
+      await new Promise<void>((resolve) => setTimeout(resolve, 800));
+    }
+  }
+
+  // Max iterations reached
+  console.log('');
+  console.log('  ╔════════════════════════════════════════════════════════╗');
+  console.log(`  ║ MAX ITERATIONS (${maxIterations}) REACHED — STOPPING ${'─'.repeat(26 - String(maxIterations).length)}║`);
+  console.log('  ╚════════════════════════════════════════════════════════╝');
+  console.log('');
+  agentLoopActive = false;
+  showPrompt();
 }
 
 // Handle Ctrl+C gracefully

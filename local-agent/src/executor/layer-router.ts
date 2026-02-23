@@ -9,9 +9,9 @@
  *   - Layer 2 (shell): Shell commands, app launching, window management
  *   - Layer 3 (cdp): Browser automation via Chrome DevTools Protocol / Playwright
  *   - Layer 4 (accessibility): Desktop app control via macOS Accessibility APIs / JXA
+ *   - Layer 5 (vision): Hybrid screenshot + context automation (last resort)
  *
  * Not yet implemented (returns "not implemented" response):
- *   - Layer 5 (vision): Screenshot-based last-resort automation
  *   - System: Keyboard shortcuts, screenshots
  */
 
@@ -37,6 +37,17 @@ import {
   pressMenuPath,
   getWindowInfo as axGetWindowInfo,
 } from './accessibility/ax-actions';
+import { captureFullScreen, captureWindow, captureRegion } from './vision/screenshot';
+import { collectVisionContext } from './vision/context-collector';
+import {
+  clickAt,
+  doubleClickAt,
+  rightClickAt,
+  typeText,
+  typeKeyCombo,
+  dragFromTo,
+  scrollAt,
+} from './vision/vision-actions';
 import { log, error as logError } from '../utils/logger';
 
 /** Timestamp prefix for log messages */
@@ -66,7 +77,7 @@ export async function routeCommand(command: AgentCommand): Promise<AgentResult> 
         return await handleAccessibilityCommand(command);
 
       case 'vision':
-        return notImplemented(command, 'Vision-based automation');
+        return await handleVisionCommand(command);
 
       case 'system':
         return notImplemented(command, 'System commands');
@@ -549,6 +560,178 @@ async function handleAccessibilityCommand(command: AgentCommand): Promise<AgentR
         id: command.id,
         status: 'error',
         data: { error: `Unknown accessibility action: ${command.action}` },
+      };
+  }
+}
+
+/**
+ * Handle Layer 5 (vision) commands.
+ * Supports screenshot capture, hybrid context collection, and coordinate-based actions.
+ */
+async function handleVisionCommand(command: AgentCommand): Promise<AgentResult> {
+  const params = command.params;
+
+  switch (command.action) {
+    case 'screenshot': {
+      const app = params.app as string | undefined;
+      const result = app ? await captureWindow(app) : await captureFullScreen();
+      return {
+        type: 'result',
+        id: command.id,
+        status: 'success',
+        data: { ...result },
+      };
+    }
+
+    case 'capture_region': {
+      const x = params.x as number;
+      const y = params.y as number;
+      const width = params.width as number;
+      const height = params.height as number;
+      if (x === undefined || y === undefined || !width || !height) {
+        return { type: 'result', id: command.id, status: 'error', data: { error: 'Missing x, y, width, or height parameter' } };
+      }
+      const result = await captureRegion(x, y, width, height);
+      return {
+        type: 'result',
+        id: command.id,
+        status: 'success',
+        data: { ...result },
+      };
+    }
+
+    case 'collect_context': {
+      const app = params.app as string | undefined;
+      const taskContext = params.taskContext as {
+        currentStep: string;
+        expectedOutcome: string;
+        workflowName: string;
+      } | undefined;
+      const result = await collectVisionContext(app, taskContext);
+      return {
+        type: 'result',
+        id: command.id,
+        status: 'success',
+        data: { ...result },
+      };
+    }
+
+    case 'click_coordinates': {
+      const x = params.x as number;
+      const y = params.y as number;
+      const verify = params.verify as boolean | undefined;
+      if (x === undefined || y === undefined) {
+        return { type: 'result', id: command.id, status: 'error', data: { error: 'Missing x or y parameter' } };
+      }
+      const result = await clickAt(x, y, verify);
+      return {
+        type: 'result',
+        id: command.id,
+        status: result.success ? 'success' : 'error',
+        data: { ...result },
+      };
+    }
+
+    case 'double_click': {
+      const x = params.x as number;
+      const y = params.y as number;
+      const verify = params.verify as boolean | undefined;
+      if (x === undefined || y === undefined) {
+        return { type: 'result', id: command.id, status: 'error', data: { error: 'Missing x or y parameter' } };
+      }
+      const result = await doubleClickAt(x, y, verify);
+      return {
+        type: 'result',
+        id: command.id,
+        status: result.success ? 'success' : 'error',
+        data: { ...result },
+      };
+    }
+
+    case 'right_click': {
+      const x = params.x as number;
+      const y = params.y as number;
+      const verify = params.verify as boolean | undefined;
+      if (x === undefined || y === undefined) {
+        return { type: 'result', id: command.id, status: 'error', data: { error: 'Missing x or y parameter' } };
+      }
+      const result = await rightClickAt(x, y, verify);
+      return {
+        type: 'result',
+        id: command.id,
+        status: result.success ? 'success' : 'error',
+        data: { ...result },
+      };
+    }
+
+    case 'type_text': {
+      const text = params.text as string;
+      if (!text) {
+        return { type: 'result', id: command.id, status: 'error', data: { error: 'Missing "text" parameter' } };
+      }
+      const result = await typeText(text);
+      return {
+        type: 'result',
+        id: command.id,
+        status: result.success ? 'success' : 'error',
+        data: { ...result },
+      };
+    }
+
+    case 'key_combo': {
+      const keys = params.keys as string[];
+      if (!keys || !Array.isArray(keys) || keys.length === 0) {
+        return { type: 'result', id: command.id, status: 'error', data: { error: 'Missing "keys" array parameter' } };
+      }
+      const result = await typeKeyCombo(keys);
+      return {
+        type: 'result',
+        id: command.id,
+        status: result.success ? 'success' : 'error',
+        data: { ...result },
+      };
+    }
+
+    case 'drag': {
+      const fromX = params.fromX as number;
+      const fromY = params.fromY as number;
+      const toX = params.toX as number;
+      const toY = params.toY as number;
+      if (fromX === undefined || fromY === undefined || toX === undefined || toY === undefined) {
+        return { type: 'result', id: command.id, status: 'error', data: { error: 'Missing fromX, fromY, toX, or toY parameter' } };
+      }
+      const result = await dragFromTo(fromX, fromY, toX, toY);
+      return {
+        type: 'result',
+        id: command.id,
+        status: result.success ? 'success' : 'error',
+        data: { ...result },
+      };
+    }
+
+    case 'scroll': {
+      const x = params.x as number;
+      const y = params.y as number;
+      const direction = params.direction as 'up' | 'down' | 'left' | 'right';
+      const amount = (params.amount as number) || 3;
+      if (x === undefined || y === undefined || !direction) {
+        return { type: 'result', id: command.id, status: 'error', data: { error: 'Missing x, y, or direction parameter' } };
+      }
+      const result = await scrollAt(x, y, direction, amount);
+      return {
+        type: 'result',
+        id: command.id,
+        status: result.success ? 'success' : 'error',
+        data: { ...result },
+      };
+    }
+
+    default:
+      return {
+        type: 'result',
+        id: command.id,
+        status: 'error',
+        data: { error: `Unknown vision action: ${command.action}` },
       };
   }
 }
