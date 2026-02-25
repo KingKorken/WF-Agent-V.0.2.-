@@ -24,6 +24,8 @@ def main():
     p_read.add_argument('filepath')
     p_read.add_argument('--sheet', default=None)
     p_read.add_argument('--range', default=None)
+    p_read.add_argument('--max-rows', type=int, default=100,
+                        help='Max data rows to return (default 100, use 0 for unlimited)')
 
     # read-cell: single cell value
     p_rc = sub.add_parser('read-cell')
@@ -103,13 +105,23 @@ def main():
                 for row in ws.iter_rows(values_only=True):
                     rows.append([str(v) if v is not None else "" for v in row])
             wb.close()
-            # First row as headers
             if rows:
                 headers = rows[0]
-                data = [dict(zip(headers, r)) for r in rows[1:]]
-                print(json.dumps({"headers": headers, "data": data, "rowCount": len(data)}))
+                data_rows = rows[1:]
+                total = len(data_rows)
+                max_rows = args.max_rows
+                truncated = False
+                if max_rows > 0 and total > max_rows:
+                    data_rows = data_rows[:max_rows]
+                    truncated = True
+                data = [dict(zip(headers, r)) for r in data_rows]
+                result = {"headers": headers, "data": data, "rowCount": len(data), "totalRows": total}
+                if truncated:
+                    result["truncated"] = True
+                    result["note"] = f"Showing {max_rows} of {total} rows. Use --max-rows 0 for all, or --range A1:Z{max_rows+1} for a specific range."
+                print(json.dumps(result))
             else:
-                print(json.dumps({"headers": [], "data": [], "rowCount": 0}))
+                print(json.dumps({"headers": [], "data": [], "rowCount": 0, "totalRows": 0}))
 
         elif args.command == 'read-cell':
             wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)

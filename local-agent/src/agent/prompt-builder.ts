@@ -40,6 +40,7 @@ You have Python file skills that let you read/write Excel and Word files DIRECTL
 ### Excel Skill (for .xlsx, .xls files):
 - Get file info: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py info "<filepath>"
 - Read all data: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py read "<filepath>"
+  (returns max 100 rows by default; use --max-rows 0 for all, or --range A1:B50 for a specific range)
 - Search for data: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py search "<filepath>" "<query>"
 - Read one cell: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py read-cell "<filepath>" "B3"
 - Write one cell: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py write-cell "<filepath>" "B3" "value"

@@ -15,6 +15,56 @@ All output is JSON.
 """
 import sys, json, argparse, os
 
+def _replace_in_paragraph(paragraph, placeholder, value):
+    """Replace placeholder in a paragraph, handling text split across multiple XML runs.
+
+    Word often splits text like '<<Na' + 'me>>' across runs.
+    This function checks the combined paragraph text, then rebuilds runs if needed.
+    Returns the number of replacements made.
+    """
+    full_text = paragraph.text
+    if placeholder not in full_text:
+        return 0
+
+    count = full_text.count(placeholder)
+
+    # Try simple per-run replacement first (works when placeholder is in a single run)
+    simple_count = 0
+    for run in paragraph.runs:
+        if placeholder in run.text:
+            run.text = run.text.replace(placeholder, value)
+            simple_count += run.text.count(value)
+
+    if simple_count > 0:
+        return count
+
+    # Placeholder is split across runs — rebuild
+    # Strategy: merge all run text, do replacement, put result in first run, clear others
+    # Preserve formatting of the first run.
+    new_text = full_text.replace(placeholder, value)
+    runs = paragraph.runs
+    if runs:
+        runs[0].text = new_text
+        for run in runs[1:]:
+            run.text = ''
+
+    return count
+
+def _replace_in_doc(doc, placeholder, value):
+    """Replace placeholder throughout entire document (paragraphs + table cells).
+    Handles placeholders split across XML runs.
+    Returns total replacement count.
+    """
+    count = 0
+    for para in doc.paragraphs:
+        count += _replace_in_paragraph(para, placeholder, value)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    count += _replace_in_paragraph(para, placeholder, value)
+    return count
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='command')
@@ -103,23 +153,7 @@ def main():
 
         elif args.command == 'replace':
             doc = Document(filepath)
-            count = 0
-            for para in doc.paragraphs:
-                if args.placeholder in para.text:
-                    for run in para.runs:
-                        if args.placeholder in run.text:
-                            run.text = run.text.replace(args.placeholder, args.value)
-                            count += 1
-            # Also replace in tables
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
-                            if args.placeholder in para.text:
-                                for run in para.runs:
-                                    if args.placeholder in run.text:
-                                        run.text = run.text.replace(args.placeholder, args.value)
-                                        count += 1
+            count = _replace_in_doc(doc, args.placeholder, args.value)
             output = args.output or filepath
             doc.save(os.path.expanduser(output))
             print(json.dumps({"replaced": args.placeholder, "with": args.value, "count": count, "saved": output}))
@@ -129,22 +163,7 @@ def main():
             replacements = json.loads(args.replacements)
             counts = {}
             for key, value in replacements.items():
-                counts[key] = 0
-                for para in doc.paragraphs:
-                    if key in para.text:
-                        for run in para.runs:
-                            if key in run.text:
-                                run.text = run.text.replace(key, str(value))
-                                counts[key] += 1
-                for table in doc.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for para in cell.paragraphs:
-                                if key in para.text:
-                                    for run in para.runs:
-                                        if key in run.text:
-                                            run.text = run.text.replace(key, str(value))
-                                            counts[key] += 1
+                counts[key] = _replace_in_doc(doc, key, str(value))
             output = args.output or filepath
             doc.save(os.path.expanduser(output))
             print(json.dumps({"replacements": counts, "saved": output}))

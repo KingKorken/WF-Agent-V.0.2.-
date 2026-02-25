@@ -84,17 +84,13 @@ console.log('[DEBUG .env] CWD:', process.cwd());
 console.log('[DEBUG .env] Key found:', !!process.env.ANTHROPIC_API_KEY);
 
 // Agent loop modules (imported after dotenv so env vars are available)
-import { initLLMClient, sendMessage, resetConversation } from '../src/agent/llm-client';
-import type { ConversationMessage } from '../src/agent/llm-client';
-import { observe } from '../src/agent/observer';
-import type { Observation } from '../src/agent/observer';
-import { buildSystemPrompt, formatObservation } from '../src/agent/prompt-builder';
-import { parseResponse } from '../src/agent/response-parser';
 import { startSession, stopSession, getStatus, listSessions, getSessionManifest } from '../src/recorder/session-manager';
 import { transcribe } from '../src/recorder/transcription';
 import { buildManifest } from '../src/recorder/manifest-builder';
 import { parseRecordingToWorkflow } from '../src/agent/workflow-parser';
 import { formatWorkflowAsGoal } from '../src/agent/workflow-executor';
+import { runAgentLoop } from '../src/agent/agent-loop';
+import type { AgentLoopCallbacks } from '../src/agent/agent-loop';
 import type { WorkflowDefinition } from '../src/agent/workflow-types';
 
 /** Timestamp prefix for log messages */
@@ -118,7 +114,6 @@ let batchActive: boolean = false; // Whether a batch is currently running
 /** Agent loop state */
 const pendingCommands: Map<string, (result: AgentResult) => void> = new Map();
 let agentLoopActive: boolean = false;
-let agentCommandCounter: number = 0;
 
 // ---------------------------------------------------------------------------
 // Start the WebSocket server
@@ -656,7 +651,7 @@ rl.on('line', (input: string) => {
         break;
       }
 
-      runAgentLoop(arg).catch((err: Error) => {
+      runAgentLoopCLI(arg).catch((err: Error) => {
         console.log(`\n  ✗ Agent loop error: ${err.message}`);
         agentLoopActive = false;
         showPrompt();
@@ -1541,7 +1536,7 @@ async function handleWorkflowCommand(args: string): Promise<void> {
       console.log(`\n  Running workflow: "${workflow.name}" (${workflow.steps.length} steps)`);
       console.log('');
 
-      runAgentLoop(goal).catch((err: Error) => {
+      runAgentLoopCLI(goal).catch((err: Error) => {
         console.log(`\n  ✗ Agent loop error: ${err.message}`);
         agentLoopActive = false;
         showPrompt();
@@ -1562,68 +1557,14 @@ async function handleWorkflowCommand(args: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Agent Loop — helpers
+// Agent Loop — CLI wrapper using extracted agent-loop module
 // ---------------------------------------------------------------------------
 
 /**
- * Format shell output for inclusion in conversation history.
- * Keeps the full text up to a limit; truncates with head+tail if too large.
+ * Run the autonomous agent loop with CLI-formatted output.
+ * Delegates to the extracted agent-loop module with pretty-printing callbacks.
  */
-function formatShellOutput(output: string): string {
-  const MAX_SHELL_OUTPUT = 4000;
-  if (!output || output.length === 0) return '(empty output)';
-  if (output.length <= MAX_SHELL_OUTPUT) return output;
-  const half = MAX_SHELL_OUTPUT / 2;
-  const head = output.substring(0, half);
-  const tail = output.substring(output.length - half);
-  return `${head}\n\n... [${output.length - MAX_SHELL_OUTPUT} chars truncated] ...\n\n${tail}`;
-}
-
-/**
- * Create a text feedback message from an action result so the LLM can see
- * what happened — especially critical for shell exec output.
- * Returns null for actions where the next screenshot observation is sufficient.
- */
-function formatActionResult(command: AgentCommand, result: AgentResult): string | null {
-  // Shell exec: the output IS the important result
-  if (command.layer === 'shell' && command.action === 'exec') {
-    const output = result.data.output as string || '';
-    const error = result.data.error as string || '';
-    const exitCode = result.data.exitCode as number;
-    let text = `SHELL COMMAND RESULT (exit code ${exitCode}):\n`;
-    if (output) {
-      text += formatShellOutput(output);
-    }
-    if (error) {
-      text += `\nSTDERR: ${formatShellOutput(error)}`;
-    }
-    if (!output && !error) {
-      text += '(no output)';
-    }
-    return text;
-  }
-
-  // Shell app management: brief status is useful
-  if (command.layer === 'shell') {
-    const msg = result.data.message as string || result.data.error as string || result.status;
-    return `ACTION RESULT (${command.action}): ${msg}`;
-  }
-
-  // For other layers (vision, cdp, accessibility), the next observation
-  // (screenshot + element data) provides the feedback. No text needed.
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Agent Loop
-// ---------------------------------------------------------------------------
-
-/**
- * Run the autonomous agent loop.
- * Observes the screen, sends observations to Claude, executes Claude's decisions.
- * Repeats until the goal is achieved, max iterations reached, or an error occurs.
- */
-async function runAgentLoop(goal: string): Promise<void> {
+async function runAgentLoopCLI(goal: string): Promise<void> {
   const maxIterations = parseInt(process.env.AGENT_MAX_ITERATIONS || '25', 10);
   const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
 
@@ -1641,126 +1582,29 @@ async function runAgentLoop(goal: string): Promise<void> {
   console.log('');
 
   agentLoopActive = true;
-  agentCommandCounter = 0;
 
-  try {
-    initLLMClient();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.log(`  ✗ Failed to initialize LLM: ${msg}`);
-    agentLoopActive = false;
-    showPrompt();
-    return;
-  }
+  const callbacks: AgentLoopCallbacks = {
+    onStep(step, max) {
+      console.log(`  ┌─── Step ${step}/${max} ${'─'.repeat(44 - String(step).length - String(max).length)}┐`);
+      console.log('  │ Observing...');
+    },
 
-  resetConversation();
+    onObservation(obs, _step) {
+      console.log(`  │ Screenshot: ${obs.screenshotSize.width}×${obs.screenshotSize.height}`);
+      console.log(`  │ App: ${obs.frontmostApp} — "${obs.windowTitle}"`);
+      const elemCount = obs.browserElements?.length ?? obs.desktopElements?.length ?? 0;
+      console.log(`  │ Data: ${obs.availableLayer} (${elemCount} elements)`);
+    },
 
-  const systemPrompt = buildSystemPrompt();
-  const conversationHistory: ConversationMessage[] = [];
-  let browserActive = false;
-  let consecutiveErrors = 0;
-  const MAX_CONSECUTIVE_ERRORS = 3;
+    onThinking() {
+      console.log('  │ Thinking...');
+    },
 
-  for (let step = 1; step <= maxIterations; step++) {
-    console.log(`  ┌─── Step ${step}/${maxIterations} ${'─'.repeat(44 - String(step).length - String(maxIterations).length)}┐`);
-
-    // === OBSERVE ===
-    console.log('  │ Observing...');
-    let observation: Observation;
-    try {
-      observation = await observe(sendCommandAndWait, browserActive);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.log(`  │ ✗ Observation failed: ${msg}`);
-      console.log('  └──────────────────────────────────────────────────────┘');
-      break;
-    }
-
-    console.log(`  │ Screenshot: ${observation.screenshotSize.width}×${observation.screenshotSize.height}`);
-    console.log(`  │ App: ${observation.frontmostApp} — "${observation.windowTitle}"`);
-    const elemCount = observation.browserElements?.length ?? observation.desktopElements?.length ?? 0;
-    console.log(`  │ Data: ${observation.availableLayer} (${elemCount} elements)`);
-
-    // === BUILD MESSAGE ===
-    const userMessage = formatObservation(observation, goal, step);
-    conversationHistory.push(userMessage);
-
-    // === DECIDE ===
-    console.log('  │ Thinking...');
-    let responseText: string;
-    try {
-      responseText = await sendMessage(systemPrompt, conversationHistory);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.log(`  │ ✗ LLM call failed: ${msg}`);
-      console.log('  └──────────────────────────────────────────────────────┘');
-      break;
-    }
-
-    // Add assistant response to history
-    conversationHistory.push({ role: 'assistant', content: responseText });
-
-    // === PARSE RESPONSE ===
-    agentCommandCounter++;
-    const parsed = parseResponse(responseText, agentCommandCounter);
-
-    if (parsed.type === 'complete') {
-      console.log(`  │ ${parsed.thinking}`);
-      console.log('  │');
-      console.log('  │ GOAL ACHIEVED');
-      console.log(`  │ ${parsed.summary}`);
-      console.log('  └──────────────────────────────────────────────────────┘');
-      console.log('');
-      console.log('  ╔════════════════════════════════════════════════════════╗');
-      console.log(`  ║ AGENT COMPLETE — ${step} step${step === 1 ? ' ' : 's'} ${'─'.repeat(34 - String(step).length)}║`);
-      console.log('  ╚════════════════════════════════════════════════════════╝');
-      console.log('');
-      agentLoopActive = false;
-      showPrompt();
-      return;
-    }
-
-    if (parsed.type === 'needs_help') {
-      console.log(`  │ ${parsed.thinking}`);
-      console.log('  │');
-      console.log(`  │ Agent needs help: ${parsed.question}`);
-      console.log('  └──────────────────────────────────────────────────────┘');
-      console.log('');
-      console.log('  Agent paused. Restart with "agent <goal>" and provide more context.');
-      agentLoopActive = false;
-      showPrompt();
-      return;
-    }
-
-    if (parsed.type === 'error') {
-      consecutiveErrors++;
-      console.log(`  │ Parse error (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}): ${parsed.error}`);
-      console.log(`  │ Raw (first 200): ${parsed.rawResponse.substring(0, 200)}`);
-      console.log('  └──────────────────────────────────────────────────────┘');
-
-      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-        console.log('');
-        console.log(`  Stopping: ${MAX_CONSECUTIVE_ERRORS} consecutive API errors. Last error: ${parsed.error}`);
-        break;
-      }
-
-      // Add plain-text correction only — no image — to avoid bloating the conversation
-      conversationHistory.push({
-        role: 'user',
-        content:
-          'Your previous response was not valid JSON. Respond with EXACTLY ONE JSON object — no markdown, no backticks, no extra text.',
-      });
-      continue;
-    }
-
-    if (parsed.type === 'action') {
-      consecutiveErrors = 0; // reset circuit breaker on valid response
-      console.log(`  │ ${parsed.thinking}`);
-      console.log(`  │ Action: ${parsed.command.layer}/${parsed.command.action}`);
-
-      // Show params (truncate large values like base64)
+    onAction(command, thinking) {
+      console.log(`  │ ${thinking}`);
+      console.log(`  │ Action: ${command.layer}/${command.action}`);
       const displayParams: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(parsed.command.params)) {
+      for (const [k, v] of Object.entries(command.params)) {
         displayParams[k] = typeof v === 'string' && v.length > 100
           ? `${v.substring(0, 50)}...(${v.length} chars)`
           : v;
@@ -1768,39 +1612,15 @@ async function runAgentLoop(goal: string): Promise<void> {
       if (Object.keys(displayParams).length > 0) {
         console.log(`  │ Params: ${JSON.stringify(displayParams).substring(0, 150)}`);
       }
-
-      // Track browser state
-      if (parsed.command.layer === 'cdp' && parsed.command.action === 'launch') {
-        browserActive = true;
-      }
-      if (parsed.command.layer === 'cdp' && parsed.command.action === 'close') {
-        browserActive = false;
-      }
-
-      // === ACT ===
       console.log('  │ Executing...');
-      let result: AgentResult;
-      try {
-        result = await sendCommandAndWait(parsed.command);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.log(`  │ ✗ Execution failed: ${msg}`);
-        console.log('  └──────────────────────────────────────────────────────┘');
-        conversationHistory.push({
-          role: 'user',
-          content: `The action failed with error: ${msg}. What should we try instead?`,
-        });
-        continue;
-      }
+    },
 
+    onActionResult(_command, result) {
       const statusMark = result.status === 'success' ? '✓' : '✗';
       console.log(`  │ ${statusMark} Result: ${result.status}`);
-
-      // Show result data (truncate base64 blobs, but preserve shell output)
       const displayData: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(result.data)) {
         if (typeof v === 'string' && v.length > 500 && /^[A-Za-z0-9+/=\s]+$/.test(v.substring(0, 100))) {
-          // Likely base64 data — truncate for display
           displayData[k] = `(${Math.round(v.length / 1024)}KB base64)`;
         } else {
           displayData[k] = v;
@@ -1808,24 +1628,51 @@ async function runAgentLoop(goal: string): Promise<void> {
       }
       console.log(`  │ Data: ${JSON.stringify(displayData).substring(0, 300)}`);
       console.log('  └──────────────────────────────────────────────────────┘');
+    },
 
-      // Feed action result back to the LLM so it can see command output
-      const resultFeedback = formatActionResult(parsed.command, result);
-      if (resultFeedback) {
-        conversationHistory.push({ role: 'user', content: resultFeedback });
+    onComplete(summary, steps) {
+      console.log('  │');
+      console.log('  │ GOAL ACHIEVED');
+      console.log(`  │ ${summary}`);
+      console.log('  └──────────────────────────────────────────────────────┘');
+      console.log('');
+      console.log('  ╔════════════════════════════════════════════════════════╗');
+      console.log(`  ║ AGENT COMPLETE — ${steps} step${steps === 1 ? ' ' : 's'} ${'─'.repeat(34 - String(steps).length)}║`);
+      console.log('  ╚════════════════════════════════════════════════════════╝');
+      console.log('');
+    },
+
+    onNeedsHelp(question) {
+      console.log('  │');
+      console.log(`  │ Agent needs help: ${question}`);
+      console.log('  └──────────────────────────────────────────────────────┘');
+      console.log('');
+      console.log('  Agent paused. Restart with "agent <goal>" and provide more context.');
+    },
+
+    onError(error, context) {
+      console.log(`  │ ✗ Error (${context}): ${error}`);
+      if (context === 'observation' || context === 'llm') {
+        console.log('  └──────────────────────────────────────────────────────┘');
       }
+    },
+  };
 
-      // Let the UI settle before the next observation
-      await new Promise<void>((resolve) => setTimeout(resolve, 800));
-    }
+  const result = await runAgentLoop({
+    goal,
+    sendAndWait: sendCommandAndWait,
+    callbacks,
+    maxIterations,
+  });
+
+  if (result.outcome === 'max_iterations') {
+    console.log('');
+    console.log('  ╔════════════════════════════════════════════════════════╗');
+    console.log(`  ║ MAX ITERATIONS (${maxIterations}) REACHED — STOPPING ${'─'.repeat(26 - String(maxIterations).length)}║`);
+    console.log('  ╚════════════════════════════════════════════════════════╝');
+    console.log('');
   }
 
-  // Max iterations reached
-  console.log('');
-  console.log('  ╔════════════════════════════════════════════════════════╗');
-  console.log(`  ║ MAX ITERATIONS (${maxIterations}) REACHED — STOPPING ${'─'.repeat(26 - String(maxIterations).length)}║`);
-  console.log('  ╚════════════════════════════════════════════════════════╝');
-  console.log('');
   agentLoopActive = false;
   showPrompt();
 }
