@@ -60,31 +60,106 @@ function isApiError(err: unknown): err is { status: number; message: string } {
 }
 
 /**
- * Prune older messages by replacing image blocks with a text placeholder.
- * Keeps the most recent RECENT_TURNS_TO_KEEP messages with full image content.
+ * Prune older messages to keep token usage flat:
+ *  - Images: replaced with a short text placeholder
+ *  - Text in user observations: compressed to a 1-line summary
+ *  - Text in assistant responses: compressed to action taken
+ * Keeps the most recent RECENT_TURNS_TO_KEEP messages with full content.
  * Returns a new array — does NOT modify the original.
  */
-function pruneImages(messages: ConversationMessage[]): ConversationMessage[] {
+function pruneOldMessages(messages: ConversationMessage[]): ConversationMessage[] {
   if (messages.length <= RECENT_TURNS_TO_KEEP) return messages;
 
   const cutoff = messages.length - RECENT_TURNS_TO_KEEP;
   return messages.map((msg, i) => {
     if (i >= cutoff) return msg; // recent — keep as-is
-    if (typeof msg.content === 'string') return msg; // no images in plain text
 
-    // Check if any blocks are images
-    const hasImages = msg.content.some((b) => b.type === 'image');
-    if (!hasImages) return msg;
+    // --- Prune assistant messages (plain text JSON) ---
+    if (msg.role === 'assistant' && typeof msg.content === 'string') {
+      return { ...msg, content: summarizeAssistantMessage(msg.content) };
+    }
 
-    // Replace image blocks with placeholder text
-    const prunedContent = msg.content.map((block) => {
-      if (block.type === 'image') {
-        return { type: 'text' as const, text: '[Screenshot removed to save context]' };
+    // --- Prune user messages with content blocks ---
+    if (typeof msg.content !== 'string' && Array.isArray(msg.content)) {
+      const prunedContent = msg.content.map((block) => {
+        if (block.type === 'image') {
+          return { type: 'text' as const, text: '[Screenshot removed]' };
+        }
+        if (block.type === 'text') {
+          return { type: 'text' as const, text: summarizeObservationText(block.text) };
+        }
+        return block;
+      });
+      return { ...msg, content: prunedContent };
+    }
+
+    // --- Prune plain-text user messages (error corrections, result feedback) ---
+    if (msg.role === 'user' && typeof msg.content === 'string') {
+      if (msg.content.length > 500) {
+        return { ...msg, content: msg.content.substring(0, 300) + '... [truncated]' };
       }
-      return block;
-    });
-    return { ...msg, content: prunedContent };
+    }
+
+    return msg;
   });
+}
+
+/**
+ * Compress a user observation text block into a 1-line summary.
+ * Extracts: app name, step number, element count — drops the full element list.
+ */
+function summarizeObservationText(text: string): string {
+  const stepMatch = text.match(/STEP (\d+)/);
+  const appMatch = text.match(/Frontmost App: (.+)/);
+  const titleMatch = text.match(/Window Title: (.+)/);
+  const browserElMatch = text.match(/BROWSER ELEMENTS \((\d+)/);
+  const desktopElMatch = text.match(/DESKTOP ELEMENTS \((\d+)/);
+  const shellMatch = text.match(/SHELL COMMAND RESULT[^:]*:\n([\s\S]{0,200})/);
+
+  const step = stepMatch ? stepMatch[1] : '?';
+  const app = appMatch ? appMatch[1].trim() : 'unknown';
+  const title = titleMatch ? titleMatch[1].trim().substring(0, 40) : '';
+  const elCount = browserElMatch ? `${browserElMatch[1]} browser els` :
+    desktopElMatch ? `${desktopElMatch[1]} desktop els` : 'no elements';
+
+  let summary = `[Step ${step}: ${app}${title ? ` — "${title}"` : ''}, ${elCount}]`;
+
+  if (shellMatch) {
+    summary += ` Shell output: ${shellMatch[1].trim().substring(0, 100)}`;
+  }
+
+  return summary;
+}
+
+/**
+ * Compress an assistant JSON response into the action that was taken.
+ */
+function summarizeAssistantMessage(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (parsed.action && typeof parsed.action === 'object') {
+      const action = parsed.action as Record<string, unknown>;
+      const params = action.params as Record<string, unknown> || {};
+      const paramKeys = Object.keys(params).filter(k => {
+        const v = params[k];
+        return typeof v === 'string' && v.length < 100;
+      });
+      const paramSummary = paramKeys.slice(0, 3).map(k => `${k}=${params[k]}`).join(', ');
+      return `[Action: ${action.layer}/${action.action}${paramSummary ? ` (${paramSummary})` : ''}]`;
+    }
+    if (parsed.status === 'complete') {
+      return `[Complete: ${String(parsed.summary || '').substring(0, 100)}]`;
+    }
+    if (parsed.status === 'needs_help') {
+      return `[Needs help: ${String(parsed.question || '').substring(0, 100)}]`;
+    }
+  } catch {
+    // Not JSON — just truncate
+  }
+  if (text.length > 200) {
+    return text.substring(0, 150) + '... [truncated]';
+  }
+  return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,13 +199,11 @@ export async function sendMessage(
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
   log(`[llm-client] Sending message (model: ${model}, history: ${messages.length} turns)`);
 
-  // Prune old images to keep token usage flat
-  const prunedMessages = pruneImages(messages);
-  if (prunedMessages.length !== messages.length || messages.length > RECENT_TURNS_TO_KEEP) {
+  // Prune old messages to keep token usage flat (images removed, text compressed)
+  const prunedMessages = pruneOldMessages(messages);
+  if (messages.length > RECENT_TURNS_TO_KEEP) {
     const prunedCount = messages.length - RECENT_TURNS_TO_KEEP;
-    if (prunedCount > 0) {
-      log(`[llm-client] Pruned images from ${prunedCount} older message(s)`);
-    }
+    log(`[llm-client] Pruned ${prunedCount} older message(s) (images removed, text compressed)`);
   }
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {

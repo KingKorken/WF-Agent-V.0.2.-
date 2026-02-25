@@ -191,16 +191,19 @@ export async function collectVisionContext(
     currentStep: string;
     expectedOutcome: string;
     workflowName: string;
-  } | null
+  } | null,
+  metadataOnly?: boolean
 ): Promise<VisionContext> {
-  log(`[${timestamp()}] [context-collector] Collecting vision context${appName ? ` for "${appName}"` : ''}`);
+  log(`[${timestamp()}] [context-collector] Collecting vision context${appName ? ` for "${appName}"` : ''}${metadataOnly ? ' (metadata only)' : ''}`);
 
-  // 1. Screenshot
-  const screenshotResult = appName
-    ? await captureWindow(appName).catch(() => captureFullScreen())
-    : await captureFullScreen();
-
-  log(`[${timestamp()}] [context-collector] Screenshot: ${screenshotResult.width}×${screenshotResult.height} (${screenshotResult.captureType})`);
+  // 1. Screenshot (skip if metadataOnly — caller already has one)
+  let screenshotResult: { base64: string; width: number; height: number; captureType: 'fullscreen' | 'window' | 'region' } = { base64: '', width: 0, height: 0, captureType: 'fullscreen' };
+  if (!metadataOnly) {
+    screenshotResult = appName
+      ? await captureWindow(appName).catch(() => captureFullScreen())
+      : await captureFullScreen();
+    log(`[${timestamp()}] [context-collector] Screenshot: ${screenshotResult.width}×${screenshotResult.height} (${screenshotResult.captureType})`);
+  }
 
   // 2. Window metadata — run in parallel where possible
   const [frontmostApp, screenSize] = await Promise.all([
@@ -217,8 +220,22 @@ export async function collectVisionContext(
 
   log(`[${timestamp()}] [context-collector] Window: "${windowTitle}" bounds=${JSON.stringify(windowBounds)}`);
 
-  // 3. Partial accessibility (with timeout)
-  const partialAccessibility = await getPartialAccessibility(resolvedApp);
+  // 3. Partial accessibility (skip if metadataOnly — caller does its own AX snapshot)
+  let partialAccessibility: VisionContext['partialAccessibility'];
+  if (metadataOnly) {
+    // Just get menu bar items (fast, always works) — skip the expensive AX scan
+    const menuBarItems = await getMenuBarItems(resolvedApp).catch(() => [] as string[]);
+    partialAccessibility = {
+      available: false,
+      menuBarItems,
+      visibleLabels: [],
+      focusedElement: null,
+      elementCount: 0,
+      rawElements: [],
+    };
+  } else {
+    partialAccessibility = await getPartialAccessibility(resolvedApp);
+  }
 
   // 4. Recent action history
   const recentActions = getRecentActions(5);

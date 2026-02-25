@@ -124,14 +124,14 @@ export async function observe(
     logError(`[observer] Screenshot failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // --- Step 2: Window metadata via collect_context -------------------------
+  // --- Step 2: Window metadata via collect_context (lightweight — no screenshot, no AX) ---
   try {
     const result = await sendAndWait({
       type: 'command',
       id: nextObsId(),
       layer: 'vision',
       action: 'collect_context',
-      params: {},
+      params: { metadataOnly: true },
     });
     if (result.status === 'success' && result.data) {
       const d = result.data;

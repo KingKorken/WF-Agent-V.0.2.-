@@ -607,7 +607,8 @@ async function handleVisionCommand(command: AgentCommand): Promise<AgentResult> 
         expectedOutcome: string;
         workflowName: string;
       } | undefined;
-      const result = await collectVisionContext(app, taskContext);
+      const metadataOnly = params.metadataOnly as boolean | undefined;
+      const result = await collectVisionContext(app, taskContext, metadataOnly);
       return {
         type: 'result',
         id: command.id,

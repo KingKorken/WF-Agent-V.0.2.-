@@ -298,6 +298,9 @@ export interface VisionCollectContextParams {
     expectedOutcome: string;
     workflowName: string;
   };
+  /** Skip screenshot and AX scan — return only window metadata, menu bar, recent actions.
+   *  Used by the observer to avoid redundant work (it takes its own screenshot + AX snapshot). */
+  metadataOnly?: boolean;
 }
 
 /** Params for click/double_click/right_click */
