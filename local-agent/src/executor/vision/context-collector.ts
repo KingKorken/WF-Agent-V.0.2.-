@@ -25,8 +25,8 @@ function timestamp(): string {
   return new Date().toISOString();
 }
 
-/** 3-second timeout for partial accessibility collection — don't hang waiting */
-const PARTIAL_AX_TIMEOUT = 3000;
+/** 8-second timeout for partial accessibility collection — complex apps like Excel need more time */
+const PARTIAL_AX_TIMEOUT = 8000;
 
 // ---------------------------------------------------------------------------
 // Internal helpers

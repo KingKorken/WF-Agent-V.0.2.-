@@ -23,14 +23,19 @@
  */
 
 import { execFile } from 'child_process';
-import { writeFileSync } from 'fs';
+import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { log, error as logError } from '../../utils/logger';
 
 /** Timeout for JXA script execution (15 seconds) */
 const JXA_TIMEOUT_MS = 15_000;
 
-/** Temp file path for JXA scripts — avoids all shell escaping issues */
-const TEMP_SCRIPT_PATH = '/tmp/wf-agent-ax-script.js';
+/** Counter for unique JXA temp file names — prevents parallel calls from overwriting each other */
+let jxaCallCounter = 0;
+
+function getTempScriptPath(): string {
+  jxaCallCounter++;
+  return `/tmp/wf-agent-ax-script-${process.pid}-${jxaCallCounter}.js`;
+}
 
 /** Timestamp prefix for log messages */
 function timestamp(): string {
@@ -106,11 +111,13 @@ export interface RawInteractiveElement {
  * @throws Error if the script fails or times out
  */
 export function runJxa(script: string): Promise<string> {
+  const tempPath = getTempScriptPath();
+
   return new Promise((resolve, reject) => {
-    log(`[${timestamp()}] [macos-ax] Writing JXA script (${script.length} chars) to ${TEMP_SCRIPT_PATH}`);
+    log(`[${timestamp()}] [macos-ax] Writing JXA script (${script.length} chars) to ${tempPath}`);
 
     try {
-      writeFileSync(TEMP_SCRIPT_PATH, script, 'utf8');
+      writeFileSync(tempPath, script, 'utf8');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       reject(new Error(`Failed to write JXA temp script: ${msg}`));
@@ -119,34 +126,40 @@ export function runJxa(script: string): Promise<string> {
 
     execFile(
       'osascript',
-      ['-l', 'JavaScript', TEMP_SCRIPT_PATH],
+      ['-l', 'JavaScript', tempPath],
       { timeout: JXA_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
       (error, stdout, stderr) => {
-        const out = stdout.trim();
-        const errText = (stderr || '').trim();
+        try {
+          const out = stdout.trim();
+          const errText = (stderr || '').trim();
 
-        log(`[${timestamp()}] [macos-ax] JXA stdout (${out.length} chars): ${out.substring(0, 500)}`);
-        if (errText) {
-          logError(`[${timestamp()}] [macos-ax] JXA stderr: ${errText}`);
-        }
+          log(`[${timestamp()}] [macos-ax] JXA stdout (${out.length} chars): ${out.substring(0, 500)}`);
+          if (errText) {
+            logError(`[${timestamp()}] [macos-ax] JXA stderr: ${errText}`);
+          }
 
-        if (error) {
-          const errMsg = errText || error.message;
-          if (errMsg.includes('not allowed assistive access') || errMsg.includes('assistive')) {
-            reject(new Error(
-              'Accessibility permission denied. Grant access in System Settings → Privacy & Security → Accessibility.'
-            ));
+          if (error) {
+            const errMsg = errText || error.message;
+            if (errMsg.includes('not allowed assistive access') || errMsg.includes('assistive')) {
+              reject(new Error(
+                'Accessibility permission denied. Grant access in System Settings → Privacy & Security → Accessibility.'
+              ));
+              return;
+            }
+            if (errMsg.includes("Can't get application process") || errMsg.includes('not running')) {
+              reject(new Error('Application not running or not found.'));
+              return;
+            }
+            reject(new Error(`JXA script failed: ${errMsg}`));
             return;
           }
-          if (errMsg.includes("Can't get application process") || errMsg.includes('not running')) {
-            reject(new Error('Application not running or not found.'));
-            return;
-          }
-          reject(new Error(`JXA script failed: ${errMsg}`));
-          return;
-        }
 
-        resolve(out);
+          resolve(out);
+        } finally {
+          try {
+            if (existsSync(tempPath)) unlinkSync(tempPath);
+          } catch { /* best-effort cleanup */ }
+        }
       }
     );
   });

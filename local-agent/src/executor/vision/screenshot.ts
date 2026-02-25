@@ -21,6 +21,33 @@ function timestamp(): string {
   return new Date().toISOString();
 }
 
+/** Max width sent to the LLM — Retina screens produce 3024px+ images */
+const MAX_SCREENSHOT_WIDTH = 1280;
+
+/**
+ * Resize a PNG file in-place using sips if its width exceeds MAX_SCREENSHOT_WIDTH.
+ * Returns the final dimensions (resized or original).
+ */
+function resizeIfNeeded(
+  imagePath: string,
+  width: number,
+  height: number
+): { width: number; height: number } {
+  if (width <= MAX_SCREENSHOT_WIDTH) return { width, height };
+  try {
+    execSync(
+      `sips --resampleWidth ${MAX_SCREENSHOT_WIDTH} "${imagePath}" --out "${imagePath}" 2>/dev/null`,
+      { encoding: 'utf8' }
+    );
+    return {
+      width: MAX_SCREENSHOT_WIDTH,
+      height: Math.round((height * MAX_SCREENSHOT_WIDTH) / width),
+    };
+  } catch {
+    return { width, height }; // best-effort — use original if resize fails
+  }
+}
+
 /**
  * Read PNG image dimensions using macOS `sips` tool.
  * Returns { width, height } or { width: 0, height: 0 } on failure.
@@ -70,7 +97,8 @@ export async function captureFullScreen(): Promise<ScreenshotResult> {
   try {
     execSync(`screencapture -x -t png "${tmpPath}"`, { encoding: 'utf8' });
 
-    const { width, height } = getPngDimensions(tmpPath);
+    const raw = getPngDimensions(tmpPath);
+    const { width, height } = resizeIfNeeded(tmpPath, raw.width, raw.height);
     const base64 = readAndCleanup(tmpPath);
 
     log(`[${timestamp()}] [screenshot] Full screen captured: ${width}×${height} (${Math.round(base64.length / 1024)}KB)`);
@@ -129,15 +157,16 @@ export async function captureWindow(appName: string): Promise<ScreenshotResult> 
 
     execSync(`screencapture -x -t png -R ${x},${y},${width},${height} "${tmpPath}"`, { encoding: 'utf8' });
 
-    const dims = getPngDimensions(tmpPath);
+    const rawDims = getPngDimensions(tmpPath);
+    const dims = resizeIfNeeded(tmpPath, rawDims.width || width, rawDims.height || height);
     const base64 = readAndCleanup(tmpPath);
 
     log(`[${timestamp()}] [screenshot] Window captured: ${dims.width}×${dims.height} (${Math.round(base64.length / 1024)}KB)`);
 
     return {
       base64,
-      width: dims.width || width,
-      height: dims.height || height,
+      width: dims.width,
+      height: dims.height,
       captureType: 'window',
       timestamp: new Date(ts).toISOString(),
     };

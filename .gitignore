@@ -8,3 +8,5 @@ dist/
 /shared/dist/
 /server/dist/
 /dashboard/dist/
+/local-agent/recordings/
+/local-agent/workflows/

@@ -45,6 +45,15 @@
  *   vision region <x> <y> <w> <h>  — Capture a specific screen region
  *   batch <cmd1> | <cmd2> | ...— Run multiple commands sequentially with delay
  *   agent <goal>               — Start the autonomous agent loop with a goal
+ *   record start [description] — Start a recording session
+ *   record stop                — Stop recording and save manifest
+ *   record status              — Show current recording status
+ *   record list                — List saved recordings
+ *   record view <id>           — View a recording's manifest
+ *   record retranscribe <id>  — Re-run Whisper transcription on existing recording
+ *   parse <sessionId>          — Parse a recording into a workflow definition
+ *   workflow list              — List saved workflows
+ *   workflow run <workflowId>  — Run a workflow through the agent loop
  *   help                       — Show available commands
  *   quit                       — Stop the test server
  *
@@ -70,6 +79,10 @@ if (!process.env.ANTHROPIC_API_KEY) {
   dotenv.config(); // cwd fallback
 }
 
+console.log('[DEBUG .env] Tried:', path.resolve(__dirname, '../../../.env'));
+console.log('[DEBUG .env] CWD:', process.cwd());
+console.log('[DEBUG .env] Key found:', !!process.env.ANTHROPIC_API_KEY);
+
 // Agent loop modules (imported after dotenv so env vars are available)
 import { initLLMClient, sendMessage, resetConversation } from '../src/agent/llm-client';
 import type { ConversationMessage } from '../src/agent/llm-client';
@@ -77,6 +90,12 @@ import { observe } from '../src/agent/observer';
 import type { Observation } from '../src/agent/observer';
 import { buildSystemPrompt, formatObservation } from '../src/agent/prompt-builder';
 import { parseResponse } from '../src/agent/response-parser';
+import { startSession, stopSession, getStatus, listSessions, getSessionManifest } from '../src/recorder/session-manager';
+import { transcribe } from '../src/recorder/transcription';
+import { buildManifest } from '../src/recorder/manifest-builder';
+import { parseRecordingToWorkflow } from '../src/agent/workflow-parser';
+import { formatWorkflowAsGoal } from '../src/agent/workflow-executor';
+import type { WorkflowDefinition } from '../src/agent/workflow-types';
 
 /** Timestamp prefix for log messages */
 function timestamp(): string {
@@ -370,6 +389,21 @@ function showHelp(): void {
   console.log('  agent <goal>               Start autonomous agent with a goal');
   console.log('                             Example: agent Open TextEdit and type "Hello World"');
   console.log('');
+  console.log('  Recording Mode (no agent connection needed):');
+  console.log('  ──────────────────────────────────────────────');
+  console.log('  record start [description] Start a recording session');
+  console.log('  record stop                Stop and save session manifest');
+  console.log('  record status              Show current recording state');
+  console.log('  record list                List all saved recordings');
+  console.log('  record view <id>           View a recording manifest');
+  console.log('  record retranscribe <id>  Re-run Whisper on existing recording');
+  console.log('');
+  console.log('  Workflow (requires ANTHROPIC_API_KEY in .env):');
+  console.log('  ──────────────────────────────────────────────');
+  console.log('  parse <sessionId>          Parse a recording into a workflow');
+  console.log('  workflow list              List saved workflows');
+  console.log('  workflow run <workflowId>  Run a workflow via the agent loop');
+  console.log('');
   console.log('  Other:');
   console.log('  ──────────────────────────────────────────────');
   console.log('  help                       Show this help message');
@@ -625,6 +659,30 @@ rl.on('line', (input: string) => {
       runAgentLoop(arg).catch((err: Error) => {
         console.log(`\n  ✗ Agent loop error: ${err.message}`);
         agentLoopActive = false;
+        showPrompt();
+      });
+      break;
+    }
+
+    case 'record': {
+      handleRecordCommand(arg).catch((err: unknown) => {
+        console.log(`  ✗ Record error: ${err instanceof Error ? err.message : String(err)}`);
+        showPrompt();
+      });
+      break;
+    }
+
+    case 'parse': {
+      handleParseCommand(arg).catch((err: unknown) => {
+        console.log(`  ✗ Parse error: ${err instanceof Error ? err.message : String(err)}`);
+        showPrompt();
+      });
+      break;
+    }
+
+    case 'workflow': {
+      handleWorkflowCommand(arg).catch((err: unknown) => {
+        console.log(`  ✗ Workflow error: ${err instanceof Error ? err.message : String(err)}`);
         showPrompt();
       });
       break;
@@ -1106,6 +1164,457 @@ function handleVisionCommand(args: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Recording Mode
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle "record <subcommand>" commands.
+ * Recording works standalone — no agent WebSocket connection needed.
+ */
+async function handleRecordCommand(args: string): Promise<void> {
+  const spaceIdx = args.indexOf(' ');
+  const sub = (spaceIdx === -1 ? args : args.substring(0, spaceIdx)).toLowerCase().trim();
+  const rest = spaceIdx === -1 ? '' : args.substring(spaceIdx + 1).trim();
+
+  switch (sub) {
+    case 'start': {
+      const description = rest || 'untitled';
+      console.log(`\n  Starting recording: "${description}"...`);
+      const state = await startSession(description);
+      console.log(`  Session ID: ${state.id}`);
+      console.log(`  Directory:  ${state.dir}`);
+      console.log(`  Status:     ${state.status}`);
+      console.log('  (Type "record stop" to stop recording)\n');
+      showPrompt();
+      break;
+    }
+
+    case 'stop': {
+      const status = getStatus();
+      if (status.status !== 'recording') {
+        console.log(`  No active recording session (status: ${status.status || 'idle'})`);
+        showPrompt();
+        return;
+      }
+      console.log('\n  Stopping recording...');
+      const finalState = await stopSession();
+      console.log(`  Session:    ${finalState.id}`);
+      console.log(`  Status:     ${finalState.status}`);
+      console.log(`  Events:     ${finalState.eventCount}`);
+      console.log(`  Frames:     ${finalState.frameCount}`);
+      console.log(`  Directory:  ${finalState.dir}`);
+      if (finalState.errorMessage) {
+        console.log(`  Error:      ${finalState.errorMessage}`);
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    case 'status': {
+      const state = getStatus();
+      console.log('');
+      if (!state.id) {
+        console.log('  No recording session (idle)');
+      } else {
+        console.log(`  Session:    ${state.id}`);
+        console.log(`  Status:     ${state.status}`);
+        console.log(`  Events:     ${state.eventCount}`);
+        console.log(`  Frames:     ${state.frameCount}`);
+        if (state.startTime) {
+          const elapsed = Math.round((Date.now() - state.startTime) / 1000);
+          console.log(`  Elapsed:    ${elapsed}s`);
+        }
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    case 'list': {
+      const sessions = listSessions();
+      console.log('');
+      if (sessions.length === 0) {
+        console.log('  No recordings found.');
+      } else {
+        console.log(`  ${sessions.length} recording(s):`);
+        for (const id of sessions) {
+          console.log(`    ${id}`);
+        }
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    case 'view': {
+      if (!rest) {
+        console.log('  Usage: record view <session-id>');
+        showPrompt();
+        return;
+      }
+      const manifest = getSessionManifest(rest);
+      if (!manifest) {
+        console.log(`  No manifest found for: ${rest}`);
+        showPrompt();
+        return;
+      }
+      console.log('');
+      console.log(`  Session: ${manifest.id}`);
+      console.log(`  Description: ${manifest.description}`);
+      console.log(`  Duration: ${Math.round((manifest.durationMs as number) / 1000)}s`);
+      console.log(`  Events: ${manifest.eventCount}`);
+      console.log(`  Frames: ${manifest.frameCount}`);
+      console.log(`  Audio: ${manifest.audioFile || 'none'}`);
+      const entries = manifest.entries as Array<Record<string, unknown>>;
+      if (entries && entries.length > 0) {
+        console.log(`  Entries (first 5 of ${entries.length}):`);
+        for (const entry of entries.slice(0, 5)) {
+          const ev = entry.event as Record<string, unknown>;
+          const frame = entry.frame as string | null;
+          const narr = entry.narration as string | null;
+          console.log(`    [${ev.type}] t=${ev.relativeMs}ms frame=${frame || 'none'} narr=${narr ? narr.substring(0, 40) : 'none'}`);
+        }
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    case 'retranscribe': {
+      if (!rest) {
+        console.log('  Usage: record retranscribe <sessionId>');
+        showPrompt();
+        return;
+      }
+
+      if (!process.env.OPENAI_API_KEY) {
+        console.log('  Error: OPENAI_API_KEY not found.');
+        console.log('  Add it to your .env file: OPENAI_API_KEY=sk-...');
+        showPrompt();
+        return;
+      }
+
+      const sessionDir = path.join(RECORDINGS_DIR, rest);
+      const fs = await import('fs');
+
+      const audioPath = path.join(sessionDir, 'audio.wav');
+      if (!fs.existsSync(audioPath)) {
+        console.log(`  No audio.wav found in session: ${rest}`);
+        console.log(`  Looked in: ${sessionDir}`);
+        showPrompt();
+        return;
+      }
+
+      const eventsPath = path.join(sessionDir, 'events.json');
+      if (!fs.existsSync(eventsPath)) {
+        console.log(`  No events.json found in session: ${rest}`);
+        showPrompt();
+        return;
+      }
+
+      console.log(`\n  Re-transcribing session "${rest}"...`);
+
+      // Load existing events
+      const events = JSON.parse(fs.readFileSync(eventsPath, 'utf8'));
+
+      // Rebuild frame map from frames/ directory
+      const frameMap = new Map<number, string>();
+      const framesDir = path.join(sessionDir, 'frames');
+      if (fs.existsSync(framesDir)) {
+        const frameFiles = fs.readdirSync(framesDir).filter((f: string) => f.endsWith('.png')).sort();
+        for (const file of frameFiles) {
+          // frame-001234.png → relativeMs 1234
+          const match = file.match(/^frame-(\d+)\.png$/);
+          if (match) {
+            const relativeMs = parseInt(match[1], 10);
+            frameMap.set(relativeMs, path.join('frames', file));
+          }
+        }
+      }
+
+      // Transcribe audio
+      console.log('  Running Whisper transcription...');
+      const transcription = await transcribe(audioPath);
+      console.log(`  Got ${transcription.length} transcription segment(s)`);
+
+      // Load existing manifest to get metadata
+      const manifestPath = path.join(sessionDir, 'manifest.json');
+      let description = rest;
+      let startTime = 0;
+      let endTime = 0;
+      if (fs.existsSync(manifestPath)) {
+        const oldManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        description = oldManifest.description || rest;
+        startTime = new Date(oldManifest.startTime).getTime();
+        endTime = new Date(oldManifest.endTime).getTime();
+      }
+
+      // Rebuild manifest with new transcription
+      buildManifest({
+        sessionId: rest,
+        description,
+        sessionDir,
+        startTime,
+        endTime,
+        events,
+        frameMap,
+        transcription,
+        audioFile: 'audio.wav',
+      });
+
+      console.log(`  Manifest rebuilt with ${transcription.length} narration segment(s)`);
+      console.log(`  Saved to: ${manifestPath}`);
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    default:
+      console.log(`  Unknown record subcommand: "${sub}"`);
+      console.log('  Available: start [description], stop, status, list, view <id>, retranscribe <id>');
+      showPrompt();
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow Parser & Executor
+// ---------------------------------------------------------------------------
+
+/** Recordings dir — matches session-manager.ts constant */
+// Compiled JS at local-agent/dist/test/test-server.js → ../../ = local-agent/
+const RECORDINGS_DIR = path.resolve(__dirname, '../../recordings');
+/** Workflows dir — matches workflow-parser.ts constant */
+const WORKFLOWS_DIR_PATH = path.resolve(__dirname, '../../workflows');
+
+/**
+ * Handle "parse <sessionId>" command.
+ * Parses a recording session into a WorkflowDefinition using Claude.
+ */
+async function handleParseCommand(sessionId: string): Promise<void> {
+  if (!sessionId) {
+    console.log('  Usage: parse <sessionId>');
+    console.log('  Tip: use "record list" to see available sessions.');
+    showPrompt();
+    return;
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log('  Error: ANTHROPIC_API_KEY not found.');
+    console.log('  Create a .env file at the repo root with: ANTHROPIC_API_KEY=sk-ant-...');
+    showPrompt();
+    return;
+  }
+
+  const sessionDir = path.join(RECORDINGS_DIR, sessionId);
+  const fs = await import('fs');
+  if (!fs.existsSync(path.join(sessionDir, 'manifest.json'))) {
+    console.log(`  No manifest.json found for session: ${sessionId}`);
+    console.log(`  Looked in: ${sessionDir}`);
+    showPrompt();
+    return;
+  }
+
+  console.log(`\n  Parsing session "${sessionId}" into a workflow...`);
+  console.log('  (This sends the recording data to Claude for analysis)\n');
+
+  const workflow = await parseRecordingToWorkflow(sessionDir);
+
+  console.log('');
+  console.log(`  Workflow parsed successfully!`);
+  console.log(`  ──────────────────────────────────────────────`);
+  console.log(`  ID:           ${workflow.id}`);
+  console.log(`  Name:         ${workflow.name}`);
+  console.log(`  Description:  ${workflow.description}`);
+  console.log(`  Apps:         ${workflow.applications.map((a) => a.name).join(', ') || 'none'}`);
+  console.log(`  Variables:    ${workflow.variables.map((v) => v.name).join(', ') || 'none'}`);
+  console.log(`  Steps:        ${workflow.steps.length}`);
+  if (workflow.loops) {
+    console.log(`  Loop:         over ${workflow.loops.over} (${workflow.loops.stepsInLoop.length} steps)`);
+  }
+  if (workflow.rules && workflow.rules.length > 0) {
+    console.log(`  Rules:        ${workflow.rules.length}`);
+  }
+  console.log(`  ──────────────────────────────────────────────`);
+  console.log(`  Saved to: ${sessionDir}/workflow.json`);
+  console.log(`  Saved to: ${WORKFLOWS_DIR_PATH}/${workflow.id}.json`);
+  console.log('');
+
+  // Print steps summary
+  console.log('  Steps:');
+  for (const step of workflow.steps) {
+    console.log(`    ${step.id}. ${step.description} [${step.layer}/${step.action}]`);
+  }
+  console.log('');
+
+  showPrompt();
+}
+
+/**
+ * Handle "workflow <subcommand>" commands.
+ */
+async function handleWorkflowCommand(args: string): Promise<void> {
+  const spaceIdx = args.indexOf(' ');
+  const sub = (spaceIdx === -1 ? args : args.substring(0, spaceIdx)).toLowerCase().trim();
+  const rest = spaceIdx === -1 ? '' : args.substring(spaceIdx + 1).trim();
+
+  switch (sub) {
+    case 'list': {
+      const fs = await import('fs');
+      console.log('');
+      if (!fs.existsSync(WORKFLOWS_DIR_PATH)) {
+        console.log('  No workflows found. Use "parse <sessionId>" to create one.');
+        console.log('');
+        showPrompt();
+        return;
+      }
+      const files = fs.readdirSync(WORKFLOWS_DIR_PATH)
+        .filter((f: string) => f.endsWith('.json'))
+        .sort();
+
+      if (files.length === 0) {
+        console.log('  No workflows found. Use "parse <sessionId>" to create one.');
+      } else {
+        console.log(`  ${files.length} workflow(s):`);
+        console.log('  ──────────────────────────────────────────────');
+        for (const file of files) {
+          try {
+            const raw = fs.readFileSync(path.join(WORKFLOWS_DIR_PATH, file), 'utf8');
+            const wf = JSON.parse(raw) as WorkflowDefinition;
+            console.log(`  ${wf.id}`);
+            console.log(`    Name:    ${wf.name}`);
+            console.log(`    Steps:   ${wf.steps.length}`);
+            console.log(`    Created: ${wf.createdAt}`);
+            console.log('');
+          } catch {
+            console.log(`  ${file} (unreadable)`);
+          }
+        }
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    case 'run': {
+      if (!rest) {
+        console.log('  Usage: workflow run <workflowId>');
+        console.log('  Tip: use "workflow list" to see available workflows.');
+        showPrompt();
+        return;
+      }
+
+      if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+        console.log('  Error: No agent connected. Start the agent first (npm run agent:dev)');
+        showPrompt();
+        return;
+      }
+
+      if (!process.env.ANTHROPIC_API_KEY) {
+        console.log('  Error: ANTHROPIC_API_KEY not found.');
+        showPrompt();
+        return;
+      }
+
+      // Load the workflow
+      const fs = await import('fs');
+      const workflowPath = path.join(WORKFLOWS_DIR_PATH, `${rest}.json`);
+      if (!fs.existsSync(workflowPath)) {
+        console.log(`  Workflow not found: ${rest}`);
+        console.log(`  Looked in: ${workflowPath}`);
+        showPrompt();
+        return;
+      }
+
+      let workflow: WorkflowDefinition;
+      try {
+        workflow = JSON.parse(fs.readFileSync(workflowPath, 'utf8')) as WorkflowDefinition;
+      } catch {
+        console.log(`  Failed to parse workflow JSON: ${rest}`);
+        showPrompt();
+        return;
+      }
+
+      // Format the workflow as a goal and run the agent loop
+      const goal = formatWorkflowAsGoal(workflow);
+      console.log(`\n  Running workflow: "${workflow.name}" (${workflow.steps.length} steps)`);
+      console.log('');
+
+      runAgentLoop(goal).catch((err: Error) => {
+        console.log(`\n  ✗ Agent loop error: ${err.message}`);
+        agentLoopActive = false;
+        showPrompt();
+      });
+      break;
+    }
+
+    default:
+      if (!sub) {
+        console.log('  Usage: workflow <list|run <id>>');
+      } else {
+        console.log(`  Unknown workflow subcommand: "${sub}"`);
+        console.log('  Available: list, run <workflowId>');
+      }
+      showPrompt();
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent Loop — helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Format shell output for inclusion in conversation history.
+ * Keeps the full text up to a limit; truncates with head+tail if too large.
+ */
+function formatShellOutput(output: string): string {
+  const MAX_SHELL_OUTPUT = 4000;
+  if (!output || output.length === 0) return '(empty output)';
+  if (output.length <= MAX_SHELL_OUTPUT) return output;
+  const half = MAX_SHELL_OUTPUT / 2;
+  const head = output.substring(0, half);
+  const tail = output.substring(output.length - half);
+  return `${head}\n\n... [${output.length - MAX_SHELL_OUTPUT} chars truncated] ...\n\n${tail}`;
+}
+
+/**
+ * Create a text feedback message from an action result so the LLM can see
+ * what happened — especially critical for shell exec output.
+ * Returns null for actions where the next screenshot observation is sufficient.
+ */
+function formatActionResult(command: AgentCommand, result: AgentResult): string | null {
+  // Shell exec: the output IS the important result
+  if (command.layer === 'shell' && command.action === 'exec') {
+    const output = result.data.output as string || '';
+    const error = result.data.error as string || '';
+    const exitCode = result.data.exitCode as number;
+    let text = `SHELL COMMAND RESULT (exit code ${exitCode}):\n`;
+    if (output) {
+      text += formatShellOutput(output);
+    }
+    if (error) {
+      text += `\nSTDERR: ${formatShellOutput(error)}`;
+    }
+    if (!output && !error) {
+      text += '(no output)';
+    }
+    return text;
+  }
+
+  // Shell app management: brief status is useful
+  if (command.layer === 'shell') {
+    const msg = result.data.message as string || result.data.error as string || result.status;
+    return `ACTION RESULT (${command.action}): ${msg}`;
+  }
+
+  // For other layers (vision, cdp, accessibility), the next observation
+  // (screenshot + element data) provides the feedback. No text needed.
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Agent Loop
 // ---------------------------------------------------------------------------
 
@@ -1149,6 +1658,8 @@ async function runAgentLoop(goal: string): Promise<void> {
   const systemPrompt = buildSystemPrompt();
   const conversationHistory: ConversationMessage[] = [];
   let browserActive = false;
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 3;
 
   for (let step = 1; step <= maxIterations; step++) {
     console.log(`  ┌─── Step ${step}/${maxIterations} ${'─'.repeat(44 - String(step).length - String(maxIterations).length)}┐`);
@@ -1222,10 +1733,18 @@ async function runAgentLoop(goal: string): Promise<void> {
     }
 
     if (parsed.type === 'error') {
-      console.log(`  │ Parse error: ${parsed.error}`);
+      consecutiveErrors++;
+      console.log(`  │ Parse error (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}): ${parsed.error}`);
       console.log(`  │ Raw (first 200): ${parsed.rawResponse.substring(0, 200)}`);
       console.log('  └──────────────────────────────────────────────────────┘');
-      // Don't break — add a clarification and retry
+
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        console.log('');
+        console.log(`  Stopping: ${MAX_CONSECUTIVE_ERRORS} consecutive API errors. Last error: ${parsed.error}`);
+        break;
+      }
+
+      // Add plain-text correction only — no image — to avoid bloating the conversation
       conversationHistory.push({
         role: 'user',
         content:
@@ -1235,6 +1754,7 @@ async function runAgentLoop(goal: string): Promise<void> {
     }
 
     if (parsed.type === 'action') {
+      consecutiveErrors = 0; // reset circuit breaker on valid response
       console.log(`  │ ${parsed.thinking}`);
       console.log(`  │ Action: ${parsed.command.layer}/${parsed.command.action}`);
 
@@ -1276,15 +1796,24 @@ async function runAgentLoop(goal: string): Promise<void> {
       const statusMark = result.status === 'success' ? '✓' : '✗';
       console.log(`  │ ${statusMark} Result: ${result.status}`);
 
-      // Show result data (truncate large values)
+      // Show result data (truncate base64 blobs, but preserve shell output)
       const displayData: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(result.data)) {
-        displayData[k] = typeof v === 'string' && v.length > 200
-          ? `(${Math.round(v.length / 1024)}KB data)`
-          : v;
+        if (typeof v === 'string' && v.length > 500 && /^[A-Za-z0-9+/=\s]+$/.test(v.substring(0, 100))) {
+          // Likely base64 data — truncate for display
+          displayData[k] = `(${Math.round(v.length / 1024)}KB base64)`;
+        } else {
+          displayData[k] = v;
+        }
       }
-      console.log(`  │ Data: ${JSON.stringify(displayData).substring(0, 150)}`);
+      console.log(`  │ Data: ${JSON.stringify(displayData).substring(0, 300)}`);
       console.log('  └──────────────────────────────────────────────────────┘');
+
+      // Feed action result back to the LLM so it can see command output
+      const resultFeedback = formatActionResult(parsed.command, result);
+      if (resultFeedback) {
+        conversationHistory.push({ role: 'user', content: resultFeedback });
+      }
 
       // Let the UI settle before the next observation
       await new Promise<void>((resolve) => setTimeout(resolve, 800));

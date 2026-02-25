@@ -27,6 +27,34 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ---------------------------------------------------------------------------
+// Coordinate scaling (image space → screen space)
+// ---------------------------------------------------------------------------
+
+const IMAGE_WIDTH = 1280; // screenshots are resized to this width
+
+let cachedScreenSize: { width: number; height: number } | null = null;
+
+async function getScreenLogicalSize(): Promise<{ width: number; height: number }> {
+  if (cachedScreenSize) return cachedScreenSize;
+  const result = await runJxa(`
+    ObjC.import('AppKit');
+    var screen = $.NSScreen.mainScreen;
+    var frame = screen.frame;
+    JSON.stringify({ width: frame.size.width, height: frame.size.height });
+  `);
+  cachedScreenSize = JSON.parse(result);
+  return cachedScreenSize!;
+}
+
+async function scaleCoords(x: number, y: number): Promise<{ scaledX: number; scaledY: number }> {
+  const screenSize = await getScreenLogicalSize();
+  const imageHeight = Math.round(screenSize.height * IMAGE_WIDTH / screenSize.width);
+  const scaledX = Math.round(x * screenSize.width / IMAGE_WIDTH);
+  const scaledY = Math.round(y * screenSize.height / imageHeight);
+  return { scaledX, scaledY };
+}
+
 /**
  * Modifier key names → JXA "using" string values.
  * System Events accepts these in the `using` array for keystroke().
@@ -77,15 +105,16 @@ export async function clickAt(
   y: number,
   verify: boolean = false
 ): Promise<VisionActionResult> {
-  log(`[${timestamp()}] [vision-actions] Click at (${x}, ${y})${verify ? ' with verify' : ''}`);
+  const { scaledX, scaledY } = await scaleCoords(x, y);
+  log(`[${timestamp()}] [vision-actions] Click at (${x}, ${y}) → scaled to (${scaledX}, ${scaledY})${verify ? ' with verify' : ''}`);
 
-  const actionDesc = `click at (${x}, ${y})`;
+  const actionDesc = `click at (${x}, ${y}) → (${scaledX}, ${scaledY})`;
   const ts = new Date().toISOString();
 
   try {
     const script = `
       ObjC.import('CoreGraphics');
-      var pt = $.CGPointMake(${x}, ${y});
+      var pt = $.CGPointMake(${scaledX}, ${scaledY});
       var down = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, pt, $.kCGMouseButtonLeft);
       var up = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseUp, pt, $.kCGMouseButtonLeft);
       $.CGEventPost($.kCGHIDEventTap, down);
@@ -124,15 +153,16 @@ export async function doubleClickAt(
   y: number,
   verify: boolean = false
 ): Promise<VisionActionResult> {
-  log(`[${timestamp()}] [vision-actions] Double-click at (${x}, ${y})`);
+  const { scaledX, scaledY } = await scaleCoords(x, y);
+  log(`[${timestamp()}] [vision-actions] Double-click at (${x}, ${y}) → scaled to (${scaledX}, ${scaledY})`);
 
-  const actionDesc = `double-click at (${x}, ${y})`;
+  const actionDesc = `double-click at (${x}, ${y}) → (${scaledX}, ${scaledY})`;
   const ts = new Date().toISOString();
 
   try {
     const script = `
       ObjC.import('CoreGraphics');
-      var pt = $.CGPointMake(${x}, ${y});
+      var pt = $.CGPointMake(${scaledX}, ${scaledY});
       var down1 = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, pt, $.kCGMouseButtonLeft);
       var up1 = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseUp, pt, $.kCGMouseButtonLeft);
       var down2 = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, pt, $.kCGMouseButtonLeft);
@@ -177,15 +207,16 @@ export async function rightClickAt(
   y: number,
   verify: boolean = false
 ): Promise<VisionActionResult> {
-  log(`[${timestamp()}] [vision-actions] Right-click at (${x}, ${y})`);
+  const { scaledX, scaledY } = await scaleCoords(x, y);
+  log(`[${timestamp()}] [vision-actions] Right-click at (${x}, ${y}) → scaled to (${scaledX}, ${scaledY})`);
 
-  const actionDesc = `right-click at (${x}, ${y})`;
+  const actionDesc = `right-click at (${x}, ${y}) → (${scaledX}, ${scaledY})`;
   const ts = new Date().toISOString();
 
   try {
     const script = `
       ObjC.import('CoreGraphics');
-      var pt = $.CGPointMake(${x}, ${y});
+      var pt = $.CGPointMake(${scaledX}, ${scaledY});
       var down = $.CGEventCreateMouseEvent(null, $.kCGEventRightMouseDown, pt, $.kCGMouseButtonRight);
       var up = $.CGEventCreateMouseEvent(null, $.kCGEventRightMouseUp, pt, $.kCGMouseButtonRight);
       $.CGEventPost($.kCGHIDEventTap, down);
@@ -223,7 +254,9 @@ export async function dragFromTo(
   toX: number,
   toY: number
 ): Promise<VisionActionResult> {
-  log(`[${timestamp()}] [vision-actions] Drag from (${fromX}, ${fromY}) to (${toX}, ${toY})`);
+  const from = await scaleCoords(fromX, fromY);
+  const to = await scaleCoords(toX, toY);
+  log(`[${timestamp()}] [vision-actions] Drag from (${fromX}, ${fromY}) → (${from.scaledX}, ${from.scaledY}) to (${toX}, ${toY}) → (${to.scaledX}, ${to.scaledY})`);
 
   const actionDesc = `drag from (${fromX}, ${fromY}) to (${toX}, ${toY})`;
   const ts = new Date().toISOString();
@@ -231,8 +264,8 @@ export async function dragFromTo(
   try {
     const script = `
       ObjC.import('CoreGraphics');
-      var from = $.CGPointMake(${fromX}, ${fromY});
-      var to = $.CGPointMake(${toX}, ${toY});
+      var from = $.CGPointMake(${from.scaledX}, ${from.scaledY});
+      var to = $.CGPointMake(${to.scaledX}, ${to.scaledY});
       $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, from, $.kCGMouseButtonLeft));
       delay(0.1);
       $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDragged, to, $.kCGMouseButtonLeft));
@@ -261,7 +294,8 @@ export async function scrollAt(
   direction: 'up' | 'down' | 'left' | 'right',
   amount: number = 3
 ): Promise<VisionActionResult> {
-  log(`[${timestamp()}] [vision-actions] Scroll ${direction} × ${amount} at (${x}, ${y})`);
+  const { scaledX, scaledY } = await scaleCoords(x, y);
+  log(`[${timestamp()}] [vision-actions] Scroll ${direction} × ${amount} at (${x}, ${y}) → scaled to (${scaledX}, ${scaledY})`);
 
   const actionDesc = `scroll ${direction} × ${amount} at (${x}, ${y})`;
   const ts = new Date().toISOString();
@@ -274,7 +308,7 @@ export async function scrollAt(
 
     const script = `
       ObjC.import('CoreGraphics');
-      var pt = $.CGPointMake(${x}, ${y});
+      var pt = $.CGPointMake(${scaledX}, ${scaledY});
       var move = $.CGEventCreateMouseEvent(null, $.kCGEventMouseMoved, pt, $.kCGMouseButtonLeft);
       $.CGEventPost($.kCGHIDEventTap, move);
       delay(0.05);
