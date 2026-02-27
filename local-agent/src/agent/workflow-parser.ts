@@ -63,12 +63,12 @@ export async function parseRecordingToWorkflow(sessionDir: string): Promise<Work
 
   // 3. Build the prompt
   const systemPrompt = buildParserSystemPrompt();
-  const userPrompt = buildParserUserPrompt(manifest, events);
+  const userContent = buildParserUserPrompt(manifest, events, sessionDir);
 
   // 4. Send to Claude
   log('[workflow-parser] Sending to Claude for analysis...');
   const messages: ConversationMessage[] = [
-    { role: 'user', content: userPrompt },
+    { role: 'user', content: userContent },
   ];
 
   let responseText = await sendMessage(systemPrompt, messages);
@@ -148,7 +148,16 @@ The JSON must match this schema:
 }`;
 }
 
-function buildParserUserPrompt(manifest: SessionManifest, events: RecordedEvent[]): string {
+/**
+ * Build the user prompt with text event data AND up to 10 key frame images.
+ * Returns structured content blocks (text + images) for the Claude API.
+ */
+function buildParserUserPrompt(
+  manifest: SessionManifest,
+  events: RecordedEvent[],
+  sessionDir: string
+): ConversationMessage['content'] {
+  // --- Build text sections ---
   const parts: string[] = [];
 
   // Header
@@ -184,31 +193,129 @@ function buildParserUserPrompt(manifest: SessionManifest, events: RecordedEvent[
     parts.push('');
   }
 
-  // Frame references (not sending images, just noting what frames exist)
-  if (manifest.frameCount > 0) {
-    parts.push('--- FRAMES (screenshots captured at these timestamps) ---');
-    const frameTimes: string[] = [];
-    for (const entry of manifest.entries) {
-      if (entry.frame) {
-        frameTimes.push(`${entry.event.relativeMs}ms: ${entry.frame}`);
-      }
-    }
-    // Deduplicate
-    const unique = [...new Set(frameTimes)];
-    for (const ft of unique.slice(0, 50)) { // cap at 50 to avoid huge prompts
-      parts.push(ft);
-    }
-    if (unique.length > 50) {
-      parts.push(`... and ${unique.length - 50} more frames`);
-    }
-    parts.push('');
-  }
-
   parts.push('--- END OF RECORDING DATA ---');
   parts.push('');
+  parts.push('Key screenshots from the recording are included below.');
   parts.push('Now produce the WorkflowDefinition JSON. Remember: ONLY valid JSON, no markdown fences.');
 
-  return parts.join('\n');
+  // --- Select key frames ---
+  const keyFrames = selectKeyFrames(manifest, events, sessionDir);
+  log(`[workflow-parser] Selected ${keyFrames.length} key frames for vision context`);
+
+  // --- Assemble content blocks ---
+  const content: ConversationMessage['content'] = [
+    { type: 'text', text: parts.join('\n') },
+  ];
+
+  // Append each key frame as a labeled text block + image block
+  for (const kf of keyFrames) {
+    content.push({ type: 'text', text: kf.label });
+    content.push({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: kf.base64 },
+    });
+  }
+
+  return content;
+}
+
+// ---------------------------------------------------------------------------
+// Key frame selection
+// ---------------------------------------------------------------------------
+
+interface KeyFrame {
+  label: string;
+  base64: string;
+  timestampMs: number;
+}
+
+const MAX_KEY_FRAMES = 10;
+const MIN_FRAME_GAP_MS = 2000;
+
+/** Priority order for event types when selecting key frames */
+const EVENT_PRIORITY: Record<string, number> = {
+  app_switch: 0,
+  window_focus: 1,
+  typing: 2,
+  click: 3,
+  doubleclick: 4,
+  hotkey: 5,
+  scroll: 6,
+};
+
+/**
+ * Select up to MAX_KEY_FRAMES frames from the manifest, prioritizing
+ * high-signal events (app_switch, window_focus, typing, clicks) and
+ * spacing them at least MIN_FRAME_GAP_MS apart.
+ */
+function selectKeyFrames(
+  manifest: SessionManifest,
+  _events: RecordedEvent[],
+  sessionDir: string
+): KeyFrame[] {
+  // Build candidates: entries that have a frame, sorted by event priority
+  const candidates = manifest.entries
+    .filter((e) => e.frame)
+    .map((e) => ({
+      entry: e,
+      priority: EVENT_PRIORITY[e.event.type] ?? 99,
+    }))
+    .sort((a, b) => a.priority - b.priority || a.entry.event.relativeMs - b.entry.event.relativeMs);
+
+  // Deduplicate by frame path (multiple events can reference the same frame)
+  const seen = new Set<string>();
+  const unique = candidates.filter((c) => {
+    if (seen.has(c.entry.frame!)) return false;
+    seen.add(c.entry.frame!);
+    return true;
+  });
+
+  // Pick frames spaced at least MIN_FRAME_GAP_MS apart
+  const selected: typeof unique = [];
+  for (const candidate of unique) {
+    if (selected.length >= MAX_KEY_FRAMES) break;
+
+    const ts = candidate.entry.event.relativeMs;
+    const tooClose = selected.some(
+      (s) => Math.abs(s.entry.event.relativeMs - ts) < MIN_FRAME_GAP_MS
+    );
+    if (tooClose) continue;
+
+    selected.push(candidate);
+  }
+
+  // Sort selected frames chronologically for the prompt
+  selected.sort((a, b) => a.entry.event.relativeMs - b.entry.event.relativeMs);
+
+  // Load PNGs from disk and base64-encode
+  const keyFrames: KeyFrame[] = [];
+  for (const s of selected) {
+    const framePath = path.join(sessionDir, s.entry.frame!);
+    if (!fs.existsSync(framePath)) {
+      log(`[workflow-parser] Frame not found, skipping: ${framePath}`);
+      continue;
+    }
+
+    const base64 = fs.readFileSync(framePath).toString('base64');
+    const ev = s.entry.event;
+    let context: string = ev.type;
+    if (ev.type === 'app_switch') {
+      context = `app_switch to ${(ev as RecordedEvent & { toApp: string }).toApp}`;
+    } else if (ev.type === 'window_focus') {
+      context = `window_focus "${(ev as RecordedEvent & { title: string }).title}"`;
+    } else if (ev.type === 'typing') {
+      const text = (ev as RecordedEvent & { text: string }).text;
+      context = `typing "${text.substring(0, 30)}${text.length > 30 ? '...' : ''}"`;
+    }
+
+    keyFrames.push({
+      label: `Screenshot at ${ev.relativeMs}ms (during ${context}):`,
+      base64,
+      timestampMs: ev.relativeMs,
+    });
+  }
+
+  return keyFrames;
 }
 
 // ---------------------------------------------------------------------------

@@ -139,13 +139,20 @@ function findFrame(relativeMs: number, frameMap: Map<number, string>): string | 
 }
 
 /**
- * Find a transcript segment that covers the given absolute timestamp (ms).
- * Returns the segment text if found, null otherwise.
+ * Find a transcript segment matching the given event timestamp (ms).
+ *
+ * 1. First pass: exact overlap (event falls within segment's time range)
+ * 2. Second pass: nearest segment within a 3-second proximity window
+ *    - Between equidistant segments, prefer the one ending before the event
+ *      (the user was describing what they're about to do)
  */
 function findNarration(
   timestampMs: number,
   segments: TranscriptionSegment[]
 ): string | null {
+  const PROXIMITY_MS = 3000;
+
+  // Pass 1: exact overlap
   for (const seg of segments) {
     const startMs = seg.startTime * 1000;
     const endMs = seg.endTime * 1000;
@@ -153,5 +160,30 @@ function findNarration(
       return seg.text;
     }
   }
-  return null;
+
+  // Pass 2: nearest segment within proximity window
+  let bestSeg: TranscriptionSegment | null = null;
+  let bestDist = Infinity;
+
+  for (const seg of segments) {
+    const startMs = seg.startTime * 1000;
+    const endMs = seg.endTime * 1000;
+
+    // Distance = gap between event and closest edge of the segment
+    let dist: number;
+    if (timestampMs < startMs) {
+      dist = startMs - timestampMs; // event is before segment
+    } else {
+      dist = timestampMs - endMs;   // event is after segment
+    }
+
+    if (dist > PROXIMITY_MS) continue;
+
+    if (dist < bestDist || (dist === bestDist && bestSeg && endMs <= timestampMs)) {
+      bestDist = dist;
+      bestSeg = seg;
+    }
+  }
+
+  return bestSeg ? bestSeg.text : null;
 }
