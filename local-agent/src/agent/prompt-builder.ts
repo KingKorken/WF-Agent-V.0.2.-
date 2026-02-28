@@ -15,6 +15,8 @@ import type { Observation } from './observer';
 
 // Absolute path to the skills directory (works from compiled dist/src/agent/)
 const SKILLS_DIR = path.resolve(__dirname, '../../../src/skills');
+// Compiled TypeScript skills (outlook-skill.ts → dist/src/skills/outlook-skill.js)
+const SKILLS_DIST_DIR = path.resolve(__dirname, '../skills');
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -53,6 +55,17 @@ You have Python file skills that let you read/write Excel and Word files DIRECTL
 
 All skill commands return JSON. Parse the JSON to get structured data.
 IMPORTANT: Use --output to save to a NEW file (e.g. "Invoice_John_Smith.docx"). Never overwrite the original template.
+
+### Outlook Skill (for sending and reading emails via Microsoft Outlook):
+- Send email: shell/exec → node ${SKILLS_DIST_DIR}/outlook-skill.js send-email --to "email@example.com" --subject "Subject" --body "Email body here"
+  Optional: --cc "cc@example.com" --bcc "bcc@example.com" (comma-separated for multiple)
+- Read inbox: shell/exec → node ${SKILLS_DIST_DIR}/outlook-skill.js read-inbox --count 10
+  Optional: --unread-only (only show unread messages)
+- Search emails: shell/exec → node ${SKILLS_DIST_DIR}/outlook-skill.js search-emails --query "invoice" --count 10
+  Optional: --folder "Sent Items" (default: inbox)
+- List folders: shell/exec → node ${SKILLS_DIST_DIR}/outlook-skill.js list-folders
+
+Outlook must be running. All commands return JSON. Use send-email instead of UI automation for composing emails — it is faster and more reliable.
 
 ### When to use skills vs UI:
 - Excel/Word file operations → ALWAYS use skills (Layer 1)
