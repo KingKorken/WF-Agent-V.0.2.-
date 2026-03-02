@@ -25,6 +25,9 @@ import { buildSystemPrompt, formatObservation } from './prompt-builder';
 import { parseResponse } from './response-parser';
 import type { ParsedResponse } from './response-parser';
 import { log } from '../utils/logger';
+import { getSkillForApp, getDiscoveredApp } from '../skills/registry';
+import { discoverAppCapabilities } from '../skills/discovery';
+import type { DiscoveryResult } from '../skills/discovery';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -84,7 +87,7 @@ export interface AgentLoopConfig {
 /** Result of the agent loop */
 export interface AgentLoopResult {
   /** How the loop ended */
-  outcome: 'complete' | 'needs_help' | 'max_iterations' | 'error';
+  outcome: 'complete' | 'needs_help' | 'max_iterations' | 'error' | 'skill_generation_needed';
 
   /** Summary (from LLM on complete, or error description) */
   summary: string;
@@ -94,6 +97,12 @@ export interface AgentLoopResult {
 
   /** The question asked (only for needs_help) */
   question?: string;
+
+  /** The app that needs a skill (only for skill_generation_needed) */
+  app?: string;
+
+  /** Discovery results for the app (only for skill_generation_needed) */
+  discovery?: DiscoveryResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +198,11 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
   let commandCounter = 0;
   const MAX_CONSECUTIVE_ERRORS = 3;
 
+  // Track per-app failures on Layer 4/5 for skill discovery
+  const appFailures: Record<string, number> = {};
+  const discoveredApps = new Set<string>();
+  const DISCOVERY_THRESHOLD = 3;
+
   for (let step = 1; step <= maxIterations; step++) {
     callbacks.onStep?.(step, maxIterations);
 
@@ -279,6 +293,65 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         callbacks.onError?.(msg, 'execution');
+
+        // Track per-app failures on accessibility/vision layers
+        const failLayer = parsed.command.layer;
+        if (failLayer === 'accessibility' || failLayer === 'vision') {
+          const failApp = observation.frontmostApp;
+          appFailures[failApp] = (appFailures[failApp] || 0) + 1;
+
+          if (appFailures[failApp] >= DISCOVERY_THRESHOLD && !discoveredApps.has(failApp)) {
+            discoveredApps.add(failApp);
+
+            // Check registry first — maybe a skill already exists
+            const existingSkill = getSkillForApp(failApp);
+            if (existingSkill) {
+              conversationHistory.push({
+                role: 'user',
+                content: `SKILL HINT: A Layer 1 skill already exists for "${failApp}". Use shell/exec with the ${existingSkill.runtime} ${existingSkill.file} commands instead of ${failLayer} automation. Available commands: ${existingSkill.commands.map(c => c.name).join(', ')}.`,
+              });
+            } else {
+              // Check if already discovered with no viable interfaces
+              const alreadyDiscovered = getDiscoveredApp(failApp);
+              if (alreadyDiscovered && !alreadyDiscovered.appleScript && !alreadyDiscovered.cli && !alreadyDiscovered.api) {
+                log(`[agent-loop] "${failApp}" was previously discovered with no viable interfaces — continuing with ${failLayer}`);
+                conversationHistory.push({
+                  role: 'user',
+                  content: `"${failApp}" has no known automation interfaces (previously discovered). Continue with ${failLayer}.`,
+                });
+              } else {
+                // Run discovery — this time we PAUSE if viable interfaces are found
+                try {
+                  const disc = await discoverAppCapabilities(failApp);
+                  log(`[agent-loop] Discovery for "${failApp}": ${disc.recommendation}`);
+
+                  const hasViableInterface = disc.appleScript.supported || disc.cli.found || disc.knownApi.hasApi;
+                  if (hasViableInterface) {
+                    // PAUSE — signal the caller that skill generation is needed
+                    log(`[agent-loop] Pausing for skill generation: "${failApp}"`);
+                    return {
+                      outcome: 'skill_generation_needed',
+                      summary: `Cannot reliably control "${failApp}" via ${failLayer}. Skill generation recommended.`,
+                      steps: step,
+                      app: failApp,
+                      discovery: disc,
+                    };
+                  } else {
+                    // No viable interfaces — continue with vision/accessibility
+                    conversationHistory.push({
+                      role: 'user',
+                      content: `SKILL DISCOVERY: ${disc.recommendation} For now, continuing with ${failLayer}.`,
+                    });
+                  }
+                } catch {
+                  // Discovery failed — continue without disrupting the loop
+                  log(`[agent-loop] Discovery failed for "${failApp}" — continuing`);
+                }
+              }
+            }
+          }
+        }
+
         conversationHistory.push({
           role: 'user',
           content: `The action failed with error: ${msg}. What should we try instead?`,
@@ -287,6 +360,13 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
       }
 
       callbacks.onActionResult?.(parsed.command, result);
+
+      // Track successful actions — reset per-app failure count
+      const actLayer = parsed.command.layer;
+      if ((actLayer === 'accessibility' || actLayer === 'vision') && result.status === 'success') {
+        const actApp = observation.frontmostApp;
+        appFailures[actApp] = 0;
+      }
 
       // Feed action result back to the LLM
       const resultFeedback = formatActionResult(parsed.command, result);

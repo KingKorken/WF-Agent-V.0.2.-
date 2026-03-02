@@ -54,6 +54,10 @@
  *   parse <sessionId>          — Parse a recording into a workflow definition
  *   workflow list              — List saved workflows
  *   workflow run <workflowId>  — Run a workflow through the agent loop
+ *   skill list                — List all registered skills
+ *   skill check <appName>     — Check if a skill exists for an app
+ *   skill discover <appName>  — Discover automation capabilities
+ *   skill generate <appName>  — Generate a new skill for an app
  *   help                       — Show available commands
  *   quit                       — Stop the test server
  *
@@ -92,6 +96,9 @@ import { formatWorkflowAsGoal } from '../src/agent/workflow-executor';
 import { runAgentLoop } from '../src/agent/agent-loop';
 import type { AgentLoopCallbacks } from '../src/agent/agent-loop';
 import type { WorkflowDefinition } from '../src/agent/workflow-types';
+import { getAllSkills, getSkillForApp } from '../src/skills/registry';
+import { discoverAppCapabilities } from '../src/skills/discovery';
+import { generateSkill } from '../src/skills/generator';
 
 /** Timestamp prefix for log messages */
 function timestamp(): string {
@@ -399,6 +406,13 @@ function showHelp(): void {
   console.log('  workflow list              List saved workflows');
   console.log('  workflow run <workflowId>  Run a workflow via the agent loop');
   console.log('');
+  console.log('  Skills:');
+  console.log('  ──────────────────────────────────────────────');
+  console.log('  skill list                 List all registered skills');
+  console.log('  skill check <appName>      Check if a skill exists for an app');
+  console.log('  skill discover <appName>   Discover automation capabilities for an app');
+  console.log('  skill generate <appName>   Generate a new skill for an app');
+  console.log('');
   console.log('  Other:');
   console.log('  ──────────────────────────────────────────────');
   console.log('  help                       Show this help message');
@@ -678,6 +692,14 @@ rl.on('line', (input: string) => {
     case 'workflow': {
       handleWorkflowCommand(arg).catch((err: unknown) => {
         console.log(`  ✗ Workflow error: ${err instanceof Error ? err.message : String(err)}`);
+        showPrompt();
+      });
+      break;
+    }
+
+    case 'skill': {
+      handleSkillCommand(arg).catch((err: unknown) => {
+        console.log(`  ✗ Skill error: ${err instanceof Error ? err.message : String(err)}`);
         showPrompt();
       });
       break;
@@ -1557,6 +1579,142 @@ async function handleWorkflowCommand(args: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Skill commands
+// ---------------------------------------------------------------------------
+
+async function handleSkillCommand(args: string): Promise<void> {
+  const spaceIdx = args.indexOf(' ');
+  const sub = (spaceIdx === -1 ? args : args.substring(0, spaceIdx)).toLowerCase().trim();
+  const rest = spaceIdx === -1 ? '' : args.substring(spaceIdx + 1).trim();
+
+  switch (sub) {
+    case 'list': {
+      const skills = getAllSkills();
+      console.log('');
+      if (skills.length === 0) {
+        console.log('  No skills registered.');
+      } else {
+        console.log(`  ${skills.length} skill(s):`);
+        console.log('  ──────────────────────────────────────────────');
+        for (const s of skills) {
+          console.log(`  ${s.app} (${s.aliases.join(', ')})`);
+          console.log(`    File:     ${s.runtime} ${s.file}`);
+          console.log(`    Commands: ${s.commands.map(c => c.name).join(', ')}`);
+          console.log(`    Generated: ${s.generated}`);
+          console.log('');
+        }
+      }
+      showPrompt();
+      break;
+    }
+
+    case 'check': {
+      if (!rest) {
+        console.log('  Usage: skill check <appName>');
+        showPrompt();
+        return;
+      }
+      const skill = getSkillForApp(rest);
+      console.log('');
+      if (skill) {
+        console.log(`  ✓ Skill exists for "${rest}" → ${skill.app}`);
+        console.log(`    Commands: ${skill.commands.map(c => c.name).join(', ')}`);
+      } else {
+        console.log(`  ✗ No skill registered for "${rest}"`);
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    case 'discover': {
+      if (!rest) {
+        console.log('  Usage: skill discover <appName>');
+        showPrompt();
+        return;
+      }
+      console.log(`\n  Discovering capabilities for "${rest}"...`);
+      const result = await discoverAppCapabilities(rest);
+      console.log('');
+      console.log(`  App: ${result.app}`);
+      console.log(`  AppleScript: ${result.appleScript.supported ? '✓ supported' : '✗ not supported'}${result.appleScript.error ? ` (${result.appleScript.error})` : ''}`);
+      console.log(`  CLI: ${result.cli.found ? `✓ found at ${result.cli.path}` : '✗ not found'}`);
+      if (result.cli.found && result.cli.helpText) {
+        const preview = result.cli.helpText.split('\n').slice(0, 3).join('\n    ');
+        console.log(`    ${preview}`);
+      }
+      console.log(`  Known API: ${result.knownApi.hasApi ? `✓ ${result.knownApi.docsUrl}` : '✗ none known'}`);
+      console.log('');
+      console.log(`  Recommendation: ${result.recommendation}`);
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    case 'generate': {
+      if (!rest) {
+        console.log('  Usage: skill generate <appName>');
+        showPrompt();
+        return;
+      }
+
+      if (!process.env.ANTHROPIC_API_KEY) {
+        console.log('  Error: ANTHROPIC_API_KEY not found.');
+        console.log('  Create a .env file at the repo root with: ANTHROPIC_API_KEY=sk-ant-...');
+        showPrompt();
+        return;
+      }
+
+      console.log(`\n  Generating skill for "${rest}"...`);
+      console.log('  Step 1: Running discovery...');
+      const disc = await discoverAppCapabilities(rest);
+
+      console.log(`  AppleScript: ${disc.appleScript.supported ? '✓' : '✗'}  CLI: ${disc.cli.found ? '✓' : '✗'}  API: ${disc.knownApi.hasApi ? '✓' : '✗'}`);
+
+      if (!disc.appleScript.supported && !disc.cli.found && !disc.knownApi.hasApi) {
+        console.log(`\n  No viable automation interfaces found for "${rest}".`);
+        console.log('  Cannot generate a skill without AppleScript, CLI, or API support.');
+        console.log('');
+        showPrompt();
+        return;
+      }
+
+      console.log('  Step 2: Generating code with Claude...');
+      const genResult = await generateSkill(rest, disc);
+
+      console.log('');
+      if (genResult.success) {
+        console.log(`  Skill generated successfully!`);
+        console.log(`  ──────────────────────────────────────────────`);
+        console.log(`  File:       ${genResult.skillFile}`);
+        console.log(`  Attempts:   ${genResult.attempts}`);
+        if (genResult.registryEntry) {
+          console.log(`  Commands:   ${genResult.registryEntry.commands.map(c => c.name).join(', ')}`);
+        }
+        console.log(`  ──────────────────────────────────────────────`);
+        console.log('  The skill is now registered and available for the agent.');
+      } else {
+        console.log(`  Skill generation failed after ${genResult.attempts} attempt(s).`);
+        console.log(`  Error: ${genResult.error}`);
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    default:
+      if (!sub) {
+        console.log('  Usage: skill <list|check <app>|discover <app>|generate <app>>');
+      } else {
+        console.log(`  Unknown skill subcommand: "${sub}"`);
+        console.log('  Available: list, check <appName>, discover <appName>, generate <appName>');
+      }
+      showPrompt();
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Agent Loop — CLI wrapper using extracted agent-loop module
 // ---------------------------------------------------------------------------
 
@@ -1658,12 +1816,59 @@ async function runAgentLoopCLI(goal: string): Promise<void> {
     },
   };
 
-  const result = await runAgentLoop({
+  let result = await runAgentLoop({
     goal,
     sendAndWait: sendCommandAndWait,
     callbacks,
     maxIterations,
   });
+
+  // Handle skill_generation_needed — ask user, generate, resume
+  while (result.outcome === 'skill_generation_needed' && result.app && result.discovery) {
+    const app = result.app;
+    console.log('');
+    console.log('  ╔════════════════════════════════════════════════════════╗');
+    console.log(`  ║ SKILL GENERATION NEEDED                               ║`);
+    console.log('  ╠════════════════════════════════════════════════════════╣');
+    const appLine = app.substring(0, 48).padEnd(48);
+    console.log(`  ║ App: ${appLine} ║`);
+    console.log(`  ║ ${result.summary.substring(0, 54).padEnd(54)} ║`);
+    console.log('  ╚════════════════════════════════════════════════════════╝');
+    console.log('');
+
+    // Ask user for permission via readline
+    const answer = await new Promise<string>((resolve) => {
+      rl.question(`  Can I generate a skill for "${app}"? (yes/no): `, resolve);
+    });
+
+    if (answer.trim().toLowerCase() !== 'yes' && answer.trim().toLowerCase() !== 'y') {
+      console.log('  Skill generation declined. Agent loop will not resume.');
+      break;
+    }
+
+    console.log(`\n  Generating skill for "${app}"...`);
+    const genResult = await generateSkill(app, result.discovery);
+
+    if (genResult.success) {
+      console.log(`  Skill generated! (${genResult.attempts} attempt${genResult.attempts === 1 ? '' : 's'})`);
+      if (genResult.registryEntry) {
+        console.log(`  Commands: ${genResult.registryEntry.commands.map(c => c.name).join(', ')}`);
+      }
+      console.log('  Resuming agent loop...\n');
+
+      // Resume the agent loop — it will now see the new skill in the system prompt
+      result = await runAgentLoop({
+        goal,
+        sendAndWait: sendCommandAndWait,
+        callbacks,
+        maxIterations,
+      });
+    } else {
+      console.log(`  Skill generation failed: ${genResult.error}`);
+      console.log('  Agent loop will not resume.');
+      break;
+    }
+  }
 
   if (result.outcome === 'max_iterations') {
     console.log('');

@@ -1,0 +1,119 @@
+{
+  "skills": [
+    {
+      "app": "Microsoft Excel",
+      "aliases": [
+        "Excel"
+      ],
+      "file": "excel-skill.py",
+      "runtime": "python3",
+      "skillsDir": "source",
+      "commands": [
+        {
+          "name": "info",
+          "args": "<filepath>",
+          "description": "Get file metadata and sheet names"
+        },
+        {
+          "name": "read",
+          "args": "<filepath>",
+          "description": "Read all data (max 100 rows). Options: --max-rows 0 for all, --range A1:B50 for specific range"
+        },
+        {
+          "name": "search",
+          "args": "<filepath> <query>",
+          "description": "Search for data in the file"
+        },
+        {
+          "name": "read-cell",
+          "args": "<filepath> <cell>",
+          "description": "Read a single cell value (e.g. B3)"
+        },
+        {
+          "name": "write-cell",
+          "args": "<filepath> <cell> <value>",
+          "description": "Write a value to a single cell"
+        }
+      ],
+      "notes": "All commands return JSON. Use --range for large files.",
+      "generated": false
+    },
+    {
+      "app": "Microsoft Word",
+      "aliases": [
+        "Word"
+      ],
+      "file": "word-skill.py",
+      "runtime": "python3",
+      "skillsDir": "source",
+      "commands": [
+        {
+          "name": "info",
+          "args": "<filepath>",
+          "description": "Get file info and find placeholders"
+        },
+        {
+          "name": "read",
+          "args": "<filepath>",
+          "description": "Read all text content"
+        },
+        {
+          "name": "replace-batch",
+          "args": "<filepath> --replacements '{\"<<Key>>\": \"value\"}' --output <output_path>",
+          "description": "Fill template by replacing placeholders"
+        },
+        {
+          "name": "fill-table",
+          "args": "<filepath> --table-index 0 --data '[[\"col1\",\"col2\"]]' --output <output_path>",
+          "description": "Fill table rows with data"
+        }
+      ],
+      "notes": "Use --output to save to a NEW file. Never overwrite the original template. All commands return JSON.",
+      "generated": false
+    },
+    {
+      "app": "Microsoft Outlook",
+      "aliases": [
+        "Outlook"
+      ],
+      "file": "outlook-skill.js",
+      "runtime": "node",
+      "skillsDir": "dist",
+      "commands": [
+        {
+          "name": "send-email",
+          "args": "--to <email> --subject <subject> --body <body>",
+          "description": "Send an email. Optional: --cc, --bcc (comma-separated for multiple)"
+        },
+        {
+          "name": "read-inbox",
+          "args": "",
+          "description": "Read recent inbox messages. Options: --count 10, --unread-only"
+        },
+        {
+          "name": "search-emails",
+          "args": "--query <search_term>",
+          "description": "Search emails. Options: --folder, --count"
+        },
+        {
+          "name": "list-folders",
+          "args": "",
+          "description": "List all available mail folders"
+        }
+      ],
+      "notes": "Outlook must be running. Use send-email instead of UI automation — it is faster and more reliable. All commands return JSON.",
+      "generated": false
+    }
+  ],
+  "discovered": [
+    {
+      "app": "Spotify",
+      "appleScript": true,
+      "cli": false,
+      "api": true,
+      "apiUrl": "https://developer.spotify.com/documentation/web-api",
+      "recommendation": "Spotify supports: AppleScript wrapper skill, REST API (https://developer.spotify.com/documentation/web-api). Recommended approach: AppleScript wrapper skill.",
+      "discoveredAt": "2026-03-01T17:09:16.106Z"
+    }
+  ]
+}

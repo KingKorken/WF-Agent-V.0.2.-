@@ -8,15 +8,10 @@
  * an image block (the screenshot) + a text block (structured data).
  */
 
-import * as path from 'path';
 import { log } from '../utils/logger';
 import type { ConversationMessage } from './llm-client';
 import type { Observation } from './observer';
-
-// Absolute path to the skills directory (works from compiled dist/src/agent/)
-const SKILLS_DIR = path.resolve(__dirname, '../../../src/skills');
-// Compiled TypeScript skills (outlook-skill.ts → dist/src/skills/outlook-skill.js)
-const SKILLS_DIST_DIR = path.resolve(__dirname, '../skills');
+import { buildSkillPromptSection, buildDiscoveredAppsPromptSection } from '../skills/registry';
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -35,39 +30,7 @@ export function buildSystemPrompt(): string {
 
 4. When reading data from files, ALWAYS use the file skill commands to read the ACTUAL file content. Never assume or "remember" data from files you created — always read from the user's real files.
 
-## FILE SKILLS (Layer 1 — highest priority, use these FIRST)
-
-You have Python file skills that let you read/write Excel and Word files DIRECTLY without opening any application. These are faster, more reliable, and more accurate than UI automation. ALWAYS prefer these over opening Excel or Word.
-
-### Excel Skill (for .xlsx, .xls files):
-- Get file info: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py info "<filepath>"
-- Read all data: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py read "<filepath>"
-  (returns max 100 rows by default; use --max-rows 0 for all, or --range A1:B50 for a specific range)
-- Search for data: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py search "<filepath>" "<query>"
-- Read one cell: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py read-cell "<filepath>" "B3"
-- Write one cell: shell/exec → python3 ${SKILLS_DIR}/excel-skill.py write-cell "<filepath>" "B3" "value"
-
-### Word Skill (for .docx files):
-- Get file info + find placeholders: shell/exec → python3 ${SKILLS_DIR}/word-skill.py info "<filepath>"
-- Read all text: shell/exec → python3 ${SKILLS_DIR}/word-skill.py read "<filepath>"
-- Fill template (batch replace): shell/exec → python3 ${SKILLS_DIR}/word-skill.py replace-batch "<filepath>" --replacements '{"<<Key>>": "value"}' --output "<output_path>"
-- Fill table: shell/exec → python3 ${SKILLS_DIR}/word-skill.py fill-table "<filepath>" --table-index 0 --data '[["col1","col2"],["col1","col2"]]' --output "<output_path>"
-
-All skill commands return JSON. Parse the JSON to get structured data.
-IMPORTANT: Use --output to save to a NEW file (e.g. "Invoice_John_Smith.docx"). Never overwrite the original template.
-
-### Outlook Skill (for sending and reading emails via Microsoft Outlook):
-- Send email: shell/exec → node ${SKILLS_DIST_DIR}/outlook-skill.js send-email --to "email@example.com" --subject "Subject" --body "Email body here"
-  Optional: --cc "cc@example.com" --bcc "bcc@example.com" (comma-separated for multiple)
-- Read inbox: shell/exec → node ${SKILLS_DIST_DIR}/outlook-skill.js read-inbox --count 10
-  Optional: --unread-only (only show unread messages)
-- Search emails: shell/exec → node ${SKILLS_DIST_DIR}/outlook-skill.js search-emails --query "invoice" --count 10
-  Optional: --folder "Sent Items" (default: inbox)
-- List folders: shell/exec → node ${SKILLS_DIST_DIR}/outlook-skill.js list-folders
-
-Outlook must be running. All commands return JSON. Use send-email instead of UI automation for composing emails — it is faster and more reliable.
-
-### When to use skills vs UI:
+${buildSkillPromptSection()}${buildDiscoveredAppsPromptSection()}### When to use skills vs UI:
 - Excel/Word file operations → ALWAYS use skills (Layer 1)
 - Opening files for the user to view → use shell/exec with "open" command (Layer 2)
 - Browser interactions → use vision/accessibility (Layer 3-5)
