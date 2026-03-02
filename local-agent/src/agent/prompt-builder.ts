@@ -11,7 +11,7 @@
 import { log } from '../utils/logger';
 import type { ConversationMessage } from './llm-client';
 import type { Observation } from './observer';
-import { buildSkillPromptSection, buildDiscoveredAppsPromptSection } from '../skills/registry';
+import { buildSkillPromptSection, buildDiscoveredAppsPromptSection, buildLearnedActionsPromptSection } from '../skills/registry';
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -30,7 +30,7 @@ export function buildSystemPrompt(): string {
 
 4. When reading data from files, ALWAYS use the file skill commands to read the ACTUAL file content. Never assume or "remember" data from files you created — always read from the user's real files.
 
-${buildSkillPromptSection()}${buildDiscoveredAppsPromptSection()}### When to use skills vs UI:
+${buildSkillPromptSection()}${buildDiscoveredAppsPromptSection()}${buildLearnedActionsPromptSection()}### When to use skills vs UI:
 - Excel/Word file operations → ALWAYS use skills (Layer 1)
 - Opening files for the user to view → use shell/exec with "open" command (Layer 2)
 - Browser interactions → use vision/accessibility (Layer 3-5)
@@ -177,21 +177,35 @@ export function formatObservation(
 
   text += `\nWhat is your next action?`;
 
+  // Only include screenshot if we have valid image data
+  const contentBlocks: Array<
+    { type: 'text'; text: string } |
+    { type: 'image'; source: { type: 'base64'; media_type: 'image/png'; data: string } }
+  > = [];
+
+  if (observation.screenshot && observation.screenshot.length > 1000) {
+    contentBlocks.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: 'image/png',
+        data: observation.screenshot,
+      },
+    });
+  } else {
+    contentBlocks.push({
+      type: 'text',
+      text: '[SCREENSHOT UNAVAILABLE — the screen capture failed for this app. Use shell commands or previous context to continue. Do NOT report an error — this is a known limitation with some apps.]',
+    });
+  }
+
+  contentBlocks.push({
+    type: 'text',
+    text,
+  });
+
   return {
     role: 'user',
-    content: [
-      {
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: 'image/png',
-          data: observation.screenshot,
-        },
-      },
-      {
-        type: 'text',
-        text,
-      },
-    ],
+    content: contentBlocks,
   };
 }

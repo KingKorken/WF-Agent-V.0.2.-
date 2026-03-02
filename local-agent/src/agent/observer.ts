@@ -113,12 +113,20 @@ export async function observe(
       params: {},
     });
     if (result.status === 'success' && result.data.base64) {
-      screenshot = result.data.base64 as string;
+      const raw = result.data.base64 as string;
       screenshotSize = {
         width: (result.data.width as number) || 0,
         height: (result.data.height as number) || 0,
       };
-      log(`[observer] Screenshot: ${screenshotSize.width}×${screenshotSize.height}`);
+
+      // Validate screenshot — reject empty or too-small images
+      const MIN_SCREENSHOT_BYTES = 1000;
+      if (raw.length >= MIN_SCREENSHOT_BYTES) {
+        screenshot = raw;
+        log(`[observer] Screenshot: ${screenshotSize.width}×${screenshotSize.height}`);
+      } else {
+        log(`[observer] WARNING: Screenshot is empty or too small (${raw.length} bytes), skipping image`);
+      }
     }
   } catch (err) {
     logError(`[observer] Screenshot failed: ${err instanceof Error ? err.message : String(err)}`);

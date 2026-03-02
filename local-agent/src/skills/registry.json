@@ -103,17 +103,134 @@
       ],
       "notes": "Outlook must be running. Use send-email instead of UI automation — it is faster and more reliable. All commands return JSON.",
       "generated": false
-    }
-  ],
-  "discovered": [
+    },
     {
       "app": "Spotify",
-      "appleScript": true,
-      "cli": false,
-      "api": true,
-      "apiUrl": "https://developer.spotify.com/documentation/web-api",
-      "recommendation": "Spotify supports: AppleScript wrapper skill, REST API (https://developer.spotify.com/documentation/web-api). Recommended approach: AppleScript wrapper skill.",
-      "discoveredAt": "2026-03-01T17:09:16.106Z"
+      "aliases": [],
+      "file": "generated/spotify-skill.js",
+      "runtime": "node",
+      "skillsDir": "dist",
+      "commands": [
+        {
+          "name": "now-playing",
+          "args": "",
+          "description": "now playing"
+        },
+        {
+          "name": "play",
+          "args": "",
+          "description": "play"
+        },
+        {
+          "name": "pause",
+          "args": "",
+          "description": "pause"
+        },
+        {
+          "name": "next",
+          "args": "",
+          "description": "next"
+        },
+        {
+          "name": "previous",
+          "args": "",
+          "description": "previous"
+        },
+        {
+          "name": "search",
+          "args": "",
+          "description": "search"
+        },
+        {
+          "name": "get-playlist",
+          "args": "",
+          "description": "get playlist"
+        },
+        {
+          "name": "list-playlists",
+          "args": "",
+          "description": "list playlists"
+        },
+        {
+          "name": "get-queue",
+          "args": "",
+          "description": "get queue"
+        },
+        {
+          "name": "add-to-queue",
+          "args": "",
+          "description": "add to queue"
+        },
+        {
+          "name": "set-volume",
+          "args": "",
+          "description": "set volume"
+        },
+        {
+          "name": "list-devices",
+          "args": "",
+          "description": "list devices"
+        },
+        {
+          "name": "get-recommendations",
+          "args": "",
+          "description": "get recommendations"
+        },
+        {
+          "name": "get-track",
+          "args": "",
+          "description": "get track"
+        },
+        {
+          "name": "get-artist",
+          "args": "",
+          "description": "get artist"
+        },
+        {
+          "name": "get-album",
+          "args": "",
+          "description": "get album"
+        },
+        {
+          "name": "create-playlist",
+          "args": "",
+          "description": "create playlist"
+        },
+        {
+          "name": "add-to-playlist",
+          "args": "",
+          "description": "add to playlist"
+        },
+        {
+          "name": "saved-tracks",
+          "args": "",
+          "description": "saved tracks"
+        },
+        {
+          "name": "save-track",
+          "args": "",
+          "description": "save track"
+        },
+        {
+          "name": "remove-track",
+          "args": "",
+          "description": "remove track"
+        },
+        {
+          "name": "top-items",
+          "args": "",
+          "description": "top items"
+        },
+        {
+          "name": "help",
+          "args": "",
+          "description": "help"
+        }
+      ],
+      "notes": "Auto-generated skill. Uses API.",
+      "generated": true
     }
-  ]
+  ],
+  "discovered": [],
+  "learnedCommands": []
 }

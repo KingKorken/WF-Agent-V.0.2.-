@@ -25,9 +25,235 @@ import { buildSystemPrompt, formatObservation } from './prompt-builder';
 import { parseResponse } from './response-parser';
 import type { ParsedResponse } from './response-parser';
 import { log } from '../utils/logger';
-import { getSkillForApp, getDiscoveredApp } from '../skills/registry';
+import {
+  getSkillForApp,
+  getDiscoveredApp,
+  getLearnedActionsForApp,
+  saveLearnedAction,
+  incrementActionUseCount,
+} from '../skills/registry';
+import type { LearnedAction } from '../skills/registry';
 import { discoverAppCapabilities } from '../skills/discovery';
 import type { DiscoveryResult } from '../skills/discovery';
+
+// ---------------------------------------------------------------------------
+// Learned action helpers
+// ---------------------------------------------------------------------------
+
+/** Patterns that indicate a generic shell command (NOT app-specific). */
+const GENERIC_COMMAND_PATTERNS = [
+  /^\s*(find|ls|cat|head|tail|echo|mkdir|rmdir|rm|cp|mv|chmod|grep|awk|sed|wc|sort|uniq|curl|wget)\s/,
+  /^\s*open\s/,
+  /^\s*python3?\s+.*\/(excel-skill|word-skill)\.py\b/,
+  /^\s*node\s+.*\/(outlook-skill|.*-skill)\.js\b/,
+];
+
+/**
+ * Check if a shell command is app-specific (worth saving) vs generic.
+ * Returns true for osascript commands and known CLI tool invocations.
+ */
+function isAppSpecificCommand(command: string): boolean {
+  if (/osascript\s+-e\s+['"]tell\s+(application|app)\s/i.test(command)) return true;
+  for (const pattern of GENERIC_COMMAND_PATTERNS) {
+    if (pattern.test(command)) return false;
+  }
+  if (/^\/[\w/]+-/.test(command.trim())) return true;
+  return false;
+}
+
+/**
+ * Extract a short description from the agent's thinking text.
+ * Takes the first sentence, max 100 chars.
+ */
+function extractDescription(thinking: string): string {
+  if (!thinking) return 'Learned action';
+  const firstSentence = thinking.split(/[.!?\n]/)[0].trim();
+  if (firstSentence.length <= 100) return firstSentence;
+  return firstSentence.substring(0, 97) + '...';
+}
+
+/** Format a learned action as a hint string for conversation injection. */
+function formatActionHint(action: LearnedAction): string {
+  switch (action.type) {
+    case 'shell':
+      return `shell/exec → ${action.command}`;
+    case 'cdp':
+      return `browser: ${action.cdpAction} ${action.elementLabel ? `"${action.elementLabel}"` : ''} on ${action.url}`;
+    case 'accessibility':
+      return `desktop: ${action.axAction} ${action.elementLabel ? `"${action.elementLabel}"` : ''}`;
+    default:
+      return action.description;
+  }
+}
+
+/**
+ * Capture a successful action as a learned action (shell, CDP, or accessibility).
+ * Only captures actions worth remembering across sessions.
+ */
+function captureLearnedAction(
+  parsed: ParsedResponse & { type: 'action' },
+  observation: Observation,
+  result: AgentResult
+): void {
+  const cmd = parsed.command;
+
+  // --- Shell/exec: only app-specific commands ---
+  if (cmd.layer === 'shell' && cmd.action === 'exec') {
+    const command = cmd.params.command as string;
+    if (!command || !isAppSpecificCommand(command)) return;
+    if (result.data?.exitCode !== 0) return;
+
+    const appName = observation.frontmostApp;
+    const existing = getLearnedActionsForApp(appName)
+      .find(a => a.type === 'shell' && a.command === command);
+    if (existing) {
+      incrementActionUseCount(appName, existing);
+    } else {
+      saveLearnedAction({
+        type: 'shell',
+        app: appName,
+        command,
+        description: extractDescription(parsed.thinking),
+        learnedAt: new Date().toISOString(),
+        useCount: 1,
+      });
+      log(`[agent-loop] Learned shell action for "${appName}": ${command.substring(0, 80)}`);
+    }
+    return;
+  }
+
+  // --- CDP: save navigate, click, type, select ---
+  if (cmd.layer === 'cdp' && ['click', 'type', 'select', 'navigate'].includes(cmd.action)) {
+    const url = observation.browserPage?.url || '';
+
+    // Resolve element label from ref
+    let elementLabel = '';
+    let elementRole = '';
+    const ref = cmd.params.ref as string;
+    if (ref && observation.browserElements) {
+      const el = observation.browserElements.find(e => e.ref === ref);
+      if (el) {
+        elementLabel = el.label;
+        elementRole = el.role;
+      }
+    }
+
+    // Don't save if we couldn't resolve the element (except for navigate)
+    if (cmd.action !== 'navigate' && !elementLabel) return;
+
+    // NEVER save passwords
+    let typedText = cmd.params.text as string | undefined;
+    if (typedText && elementLabel.toLowerCase().includes('password')) {
+      typedText = undefined;
+    }
+
+    saveLearnedAction({
+      type: 'cdp',
+      app: observation.frontmostApp,
+      url,
+      cdpAction: cmd.action,
+      elementLabel: cmd.action === 'navigate' ? (cmd.params.url as string) : elementLabel,
+      elementRole,
+      typedText,
+      description: extractDescription(parsed.thinking),
+      learnedAt: new Date().toISOString(),
+      useCount: 1,
+    });
+    return;
+  }
+
+  // --- Accessibility: save press_button, set_value, menu_click ---
+  if (cmd.layer === 'accessibility' && ['press_button', 'set_value', 'menu_click'].includes(cmd.action)) {
+    let elementLabel = '';
+    const ref = cmd.params.ref as string;
+    if (ref && observation.desktopElements) {
+      const el = observation.desktopElements.find(e => e.ref === ref);
+      if (el) {
+        elementLabel = el.label;
+      }
+    }
+
+    saveLearnedAction({
+      type: 'accessibility',
+      app: observation.frontmostApp,
+      axAction: cmd.action,
+      elementLabel: elementLabel || cmd.params.label as string || '',
+      menuPath: cmd.params.menuPath as string[] | undefined,
+      setValue: cmd.action === 'set_value' ? cmd.params.value as string : undefined,
+      description: extractDescription(parsed.thinking),
+      learnedAt: new Date().toISOString(),
+      useCount: 1,
+    });
+    return;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stuck detection helpers
+// ---------------------------------------------------------------------------
+
+interface ActionRecord {
+  layer: string;
+  action: string;
+  keyParam: string;
+  app: string;
+  windowTitle: string;
+}
+
+const MAX_ACTION_HISTORY = 10;
+const STUCK_THRESHOLD = 3;
+const UNRELIABLE_THRESHOLD = 5;
+
+/** Extract a simplified key parameter for action comparison. */
+function extractKeyParam(cmd: AgentCommand): string {
+  if (cmd.layer === 'shell' && cmd.action === 'exec') {
+    return (cmd.params.command as string || '').substring(0, 100);
+  }
+  if (cmd.params.ref) return cmd.params.ref as string;
+  if (cmd.params.url) return cmd.params.url as string;
+  if (cmd.params.x && cmd.params.y) return `${cmd.params.x},${cmd.params.y}`;
+  return JSON.stringify(cmd.params).substring(0, 50);
+}
+
+/**
+ * Detect if the agent is stuck. Returns a description of the stuck pattern,
+ * or null if not stuck.
+ *
+ * Two checks:
+ * (C) Same action repeated — identical layer+action+keyParam 3+ times
+ * (B) Same screen state — app + windowTitle unchanged for 3+ interactive actions
+ */
+function detectStuck(history: ActionRecord[], currentObs: Observation): string | null {
+  if (history.length < 3) return null;
+
+  const recent = history.slice(-3);
+
+  // Check (C): Same action repeated 3 times
+  const allSameAction = recent.every(r =>
+    r.layer === recent[0].layer &&
+    r.action === recent[0].action &&
+    r.keyParam === recent[0].keyParam
+  );
+  if (allSameAction) {
+    return `repeated ${recent[0].layer}/${recent[0].action} 3 times`;
+  }
+
+  // Check (B): Same screen state for 3 actions (app + window title unchanged)
+  const allSameScreen = recent.every(r =>
+    r.app === currentObs.frontmostApp &&
+    r.windowTitle === (currentObs.windowTitle || '')
+  );
+  if (allSameScreen && !allSameAction) {
+    const allInteractive = recent.every(r =>
+      r.action !== 'screenshot' && r.action !== 'snapshot' && r.action !== 'collect_context'
+    );
+    if (allInteractive) {
+      return `3 different actions on "${currentObs.frontmostApp}" with no screen change`;
+    }
+  }
+
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -203,6 +429,10 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
   const discoveredApps = new Set<string>();
   const DISCOVERY_THRESHOLD = 3;
 
+  // Stuck detection state (per-session, not persisted)
+  const actionHistory: ActionRecord[] = [];
+  const stuckSignals: Record<string, number> = {};
+
   for (let step = 1; step <= maxIterations; step++) {
     callbacks.onStep?.(step, maxIterations);
 
@@ -311,6 +541,21 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
                 content: `SKILL HINT: A Layer 1 skill already exists for "${failApp}". Use shell/exec with the ${existingSkill.runtime} ${existingSkill.file} commands instead of ${failLayer} automation. Available commands: ${existingSkill.commands.map(c => c.name).join(', ')}.`,
               });
             } else {
+              // Check for learned actions — we may already know how to talk to this app
+              const learnedActions = getLearnedActionsForApp(failApp);
+              if (learnedActions.length > 0) {
+                conversationHistory.push({
+                  role: 'user',
+                  content: `LEARNED ACTIONS for "${failApp}": You have previously used these successfully:\n${learnedActions.map((a: LearnedAction) => `- ${a.description}: ${formatActionHint(a)}`).join('\n')}\nTry these instead of ${failLayer}.`,
+                });
+                // Don't trigger discovery — we already know how to talk to this app
+                conversationHistory.push({
+                  role: 'user',
+                  content: `The action failed with error: ${msg}. What should we try instead?`,
+                });
+                continue;
+              }
+
               // Check if already discovered with no viable interfaces
               const alreadyDiscovered = getDiscoveredApp(failApp);
               if (alreadyDiscovered && !alreadyDiscovered.appleScript && !alreadyDiscovered.cli && !alreadyDiscovered.api) {
@@ -366,6 +611,81 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
       if ((actLayer === 'accessibility' || actLayer === 'vision') && result.status === 'success') {
         const actApp = observation.frontmostApp;
         appFailures[actApp] = 0;
+      }
+
+      // Capture successful actions for learning (shell, CDP, accessibility)
+      if (result.status === 'success') {
+        captureLearnedAction(parsed, observation, result);
+      }
+
+      // --- Stuck detection ---
+      if (result.status === 'success') {
+        const keyParam = extractKeyParam(parsed.command);
+        const record: ActionRecord = {
+          layer: parsed.command.layer,
+          action: parsed.command.action,
+          keyParam,
+          app: observation.frontmostApp,
+          windowTitle: observation.windowTitle || '',
+        };
+        actionHistory.push(record);
+        if (actionHistory.length > MAX_ACTION_HISTORY) actionHistory.shift();
+
+        // Reset stuck counter if screen changed (agent making progress)
+        const prevRecord = actionHistory.length >= 2 ? actionHistory[actionHistory.length - 2] : null;
+        if (prevRecord && (prevRecord.app !== observation.frontmostApp || prevRecord.windowTitle !== observation.windowTitle)) {
+          stuckSignals[observation.frontmostApp] = 0;
+        }
+
+        // Detect stuck patterns
+        const stuckType = detectStuck(actionHistory, observation);
+        if (stuckType) {
+          const stuckApp = observation.frontmostApp;
+          stuckSignals[stuckApp] = (stuckSignals[stuckApp] || 0) + 1;
+          log(`[agent-loop] Stuck detected for "${stuckApp}": ${stuckType} (${stuckSignals[stuckApp]} signals)`);
+
+          if (stuckSignals[stuckApp] >= STUCK_THRESHOLD) {
+            const stuckActions = getLearnedActionsForApp(stuckApp);
+            if (stuckActions.length > 0) {
+              conversationHistory.push({
+                role: 'user',
+                content: `STUCK DETECTION: You seem to be stuck on "${stuckApp}" — repeating similar actions without progress. Here are actions that previously worked for this app:\n${stuckActions.map((a: LearnedAction) => `- ${a.description}: ${formatActionHint(a)}`).join('\n')}\nTry a different approach.`,
+              });
+            } else {
+              conversationHistory.push({
+                role: 'user',
+                content: `STUCK DETECTION: You seem to be stuck on "${stuckApp}" — repeating actions without progress. Try a completely different approach:\n- Use a different layer (shell command instead of clicking)\n- Try osascript to control the app via AppleScript\n- Look for keyboard shortcuts instead of clicking buttons`,
+              });
+            }
+          }
+
+          if (stuckSignals[stuckApp] >= UNRELIABLE_THRESHOLD && !discoveredApps.has(stuckApp)) {
+            discoveredApps.add(stuckApp);
+            const existingSkill = getSkillForApp(stuckApp);
+            if (existingSkill) {
+              conversationHistory.push({
+                role: 'user',
+                content: `SKILL HINT: A Layer 1 skill exists for "${stuckApp}". Use it instead.`,
+              });
+            } else {
+              try {
+                const disc = await discoverAppCapabilities(stuckApp);
+                const hasViable = disc.appleScript.supported || disc.cli.found || disc.knownApi.hasApi;
+                if (hasViable) {
+                  return {
+                    outcome: 'skill_generation_needed',
+                    summary: `Vision unreliable for "${stuckApp}". Skill generation recommended.`,
+                    steps: step,
+                    app: stuckApp,
+                    discovery: disc,
+                  };
+                }
+              } catch {
+                log(`[agent-loop] Discovery failed for "${stuckApp}" during stuck detection`);
+              }
+            }
+          }
+        }
       }
 
       // Feed action result back to the LLM

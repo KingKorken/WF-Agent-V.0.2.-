@@ -58,6 +58,8 @@
  *   skill check <appName>     — Check if a skill exists for an app
  *   skill discover <appName>  — Discover automation capabilities
  *   skill generate <appName>  — Generate a new skill for an app
+ *   skill learned [appName]   — List learned actions (all or per app)
+ *   skill forget <appName>    — Forget all learned actions for an app
  *   help                       — Show available commands
  *   quit                       — Stop the test server
  *
@@ -96,7 +98,8 @@ import { formatWorkflowAsGoal } from '../src/agent/workflow-executor';
 import { runAgentLoop } from '../src/agent/agent-loop';
 import type { AgentLoopCallbacks } from '../src/agent/agent-loop';
 import type { WorkflowDefinition } from '../src/agent/workflow-types';
-import { getAllSkills, getSkillForApp } from '../src/skills/registry';
+import { getAllSkills, getSkillForApp, getAllLearnedActions, getLearnedActionsForApp, removeLearnedActionsForApp } from '../src/skills/registry';
+import type { LearnedAction } from '../src/skills/registry';
 import { discoverAppCapabilities } from '../src/skills/discovery';
 import { generateSkill } from '../src/skills/generator';
 
@@ -412,6 +415,8 @@ function showHelp(): void {
   console.log('  skill check <appName>      Check if a skill exists for an app');
   console.log('  skill discover <appName>   Discover automation capabilities for an app');
   console.log('  skill generate <appName>   Generate a new skill for an app');
+  console.log('  skill learned [appName]    List learned actions (all or per app)');
+  console.log('  skill forget <appName>     Forget all learned actions for an app');
   console.log('');
   console.log('  Other:');
   console.log('  ──────────────────────────────────────────────');
@@ -1702,12 +1707,91 @@ async function handleSkillCommand(args: string): Promise<void> {
       break;
     }
 
+    case 'learned': {
+      console.log('');
+
+      /** Format a single learned action for display. */
+      function formatAction(a: LearnedAction): string {
+        const useSuffix = a.useCount > 1 ? ` (used ${a.useCount}x)` : '';
+        switch (a.type) {
+          case 'shell':
+            return `[shell] ${a.description}: ${a.command}${useSuffix}`;
+          case 'cdp':
+            return `[cdp] ${a.cdpAction} "${a.elementLabel || '?'}" on ${a.url || '?'}${useSuffix}`;
+          case 'accessibility':
+            return `[ax] ${a.axAction} "${a.elementLabel || '?'}"${useSuffix}`;
+          default:
+            return `[?] ${a.description}${useSuffix}`;
+        }
+      }
+
+      if (rest) {
+        // Per-app
+        const actions = getLearnedActionsForApp(rest);
+        if (actions.length === 0) {
+          console.log(`  No learned actions for "${rest}".`);
+        } else {
+          console.log(`  === Learned Actions for "${rest}" ===`);
+          console.log(`  ${actions.length} action(s):`);
+          console.log('  ──────────────────────────────────────────────');
+          for (const a of actions) {
+            console.log(`    ${formatAction(a)}`);
+          }
+        }
+      } else {
+        // All apps
+        const all = getAllLearnedActions();
+        if (all.length === 0) {
+          console.log('  No learned actions yet.');
+          console.log('  Actions are learned automatically when the agent successfully interacts with apps.');
+        } else {
+          // Group by app
+          const byApp: Record<string, LearnedAction[]> = {};
+          for (const a of all) {
+            if (!byApp[a.app]) byApp[a.app] = [];
+            byApp[a.app].push(a);
+          }
+          console.log(`  === Learned Actions ===`);
+          console.log(`  ${all.length} action(s) across ${Object.keys(byApp).length} app(s):`);
+          console.log('  ──────────────────────────────────────────────');
+          for (const [app, actions] of Object.entries(byApp)) {
+            console.log(`  ${app} (${actions.length} action${actions.length !== 1 ? 's' : ''}):`);
+            for (const a of actions) {
+              console.log(`    ${formatAction(a)}`);
+            }
+            console.log('');
+          }
+        }
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
+    case 'forget': {
+      if (!rest) {
+        console.log('  Usage: skill forget <appName>');
+        showPrompt();
+        return;
+      }
+      const before = getLearnedActionsForApp(rest);
+      if (before.length === 0) {
+        console.log(`  No learned actions for "${rest}" to forget.`);
+      } else {
+        removeLearnedActionsForApp(rest);
+        console.log(`  Removed ${before.length} learned action(s) for "${rest}".`);
+      }
+      console.log('');
+      showPrompt();
+      break;
+    }
+
     default:
       if (!sub) {
-        console.log('  Usage: skill <list|check <app>|discover <app>|generate <app>>');
+        console.log('  Usage: skill <list|check|discover|generate|learned|forget> [appName]');
       } else {
         console.log(`  Unknown skill subcommand: "${sub}"`);
-        console.log('  Available: list, check <appName>, discover <appName>, generate <appName>');
+        console.log('  Available: list, check, discover, generate, learned, forget');
       }
       showPrompt();
       break;

@@ -35,6 +35,13 @@ export interface ConversationMessage {
   content: string | ContentBlock[];
 }
 
+export interface LLMResponse {
+  text: string;
+  truncated: boolean;
+  inputTokens: number;
+  outputTokens: number;
+}
+
 // ---------------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------------
@@ -183,21 +190,24 @@ export function initLLMClient(): void {
 }
 
 /**
- * Send a message to Claude and return the text response.
+ * Send a message to Claude and return the text response along with metadata.
  *
  * @param systemPrompt - The system prompt (sent on every call)
  * @param messages     - Full conversation history (caller manages this array)
+ * @param maxTokens    - Override the default max tokens (optional)
  */
-export async function sendMessage(
+export async function sendMessageWithMeta(
   systemPrompt: string,
-  messages: ConversationMessage[]
-): Promise<string> {
+  messages: ConversationMessage[],
+  maxTokens?: number
+): Promise<LLMResponse> {
   if (!client) {
     throw new Error('LLM client not initialized. Call initLLMClient() first.');
   }
 
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
-  log(`[llm-client] Sending message (model: ${model}, history: ${messages.length} turns)`);
+  const tokenLimit = maxTokens || DEFAULT_MAX_TOKENS;
+  log(`[llm-client] Sending message (model: ${model}, max_tokens: ${tokenLimit}, history: ${messages.length} turns)`);
 
   // Prune old messages to keep token usage flat (images removed, text compressed)
   const prunedMessages = pruneOldMessages(messages);
@@ -210,14 +220,16 @@ export async function sendMessage(
     try {
       const response = await client.messages.create({
         model,
-        max_tokens: DEFAULT_MAX_TOKENS,
+        max_tokens: tokenLimit,
         system: systemPrompt,
         messages: prunedMessages as Anthropic.MessageParam[],
       });
 
       const inputTokens = response.usage?.input_tokens ?? 0;
       const outputTokens = response.usage?.output_tokens ?? 0;
-      log(`[llm-client] Response received. Tokens: ${inputTokens} in / ${outputTokens} out`);
+      const truncated = response.stop_reason === 'max_tokens';
+
+      log(`[llm-client] Response received. Tokens: ${inputTokens} in / ${outputTokens} out${truncated ? ' (TRUNCATED)' : ''}`);
 
       // Extract text from the first content block
       const textBlock = response.content.find((b) => b.type === 'text');
@@ -228,7 +240,7 @@ export async function sendMessage(
       const preview = textBlock.text.substring(0, 100).replace(/\n/g, ' ');
       log(`[llm-client] Response preview: ${preview}...`);
 
-      return textBlock.text;
+      return { text: textBlock.text, truncated, inputTokens, outputTokens };
     } catch (err) {
       const statusCode = isApiError(err) ? err.status : 0;
       const isRetryable = statusCode === 429 || statusCode === 529;
@@ -243,13 +255,36 @@ export async function sendMessage(
 
       const message = err instanceof Error ? err.message : String(err);
       logError(`[llm-client] API call failed: ${message}`);
-      // Return a JSON error string so the response parser can handle it gracefully
-      return JSON.stringify({ status: 'error', error: `API call failed: ${message}` });
+      return {
+        text: JSON.stringify({ status: 'error', error: `API call failed: ${message}` }),
+        truncated: false,
+        inputTokens: 0,
+        outputTokens: 0,
+      };
     }
   }
 
-  // Should never reach here, but satisfy TypeScript
-  return JSON.stringify({ status: 'error', error: 'Unexpected: exhausted retry loop' });
+  return {
+    text: JSON.stringify({ status: 'error', error: 'Unexpected: exhausted retry loop' }),
+    truncated: false,
+    inputTokens: 0,
+    outputTokens: 0,
+  };
+}
+
+/**
+ * Send a message to Claude and return the text response.
+ * Delegates to sendMessageWithMeta() — kept for backward compatibility.
+ *
+ * @param systemPrompt - The system prompt (sent on every call)
+ * @param messages     - Full conversation history (caller manages this array)
+ */
+export async function sendMessage(
+  systemPrompt: string,
+  messages: ConversationMessage[]
+): Promise<string> {
+  const result = await sendMessageWithMeta(systemPrompt, messages);
+  return result.text;
 }
 
 /**

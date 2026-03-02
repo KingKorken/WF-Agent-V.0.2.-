@@ -17,7 +17,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFile } from 'child_process';
-import { initLLMClient, sendMessage } from '../agent/llm-client';
+import { initLLMClient, sendMessageWithMeta } from '../agent/llm-client';
 import type { ConversationMessage } from '../agent/llm-client';
 import type { DiscoveryResult } from './discovery';
 import { registerSkill, SKILLS_DIR, SKILLS_DIST_DIR } from './registry';
@@ -47,6 +47,7 @@ export interface GenerationResult {
 // ---------------------------------------------------------------------------
 
 const MAX_ATTEMPTS = 5;
+const GENERATION_MAX_TOKENS = 8192;
 const GENERATED_SOURCE_DIR = path.join(SKILLS_DIR, 'generated');
 const GENERATED_DIST_DIR = path.join(SKILLS_DIST_DIR, 'generated');
 const TEMPLATE_PATH = path.join(SKILLS_DIR, 'outlook-skill.ts');
@@ -57,22 +58,53 @@ const TEST_TIMEOUT = 15_000;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Run a command and return stdout/stderr. */
+/** Run a command and return stdout/stderr/errorMessage separately. */
 function runCmd(
   cmd: string,
   args: string[],
   timeout: number = COMPILE_TIMEOUT
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+): Promise<{ stdout: string; stderr: string; exitCode: number; errorMessage: string }> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout }, (err, stdout, stderr) => {
-      const exitCode = err && 'code' in err ? (err as NodeJS.ErrnoException).code === 'ETIMEDOUT' ? 124 : 1 : 0;
+    execFile(cmd, args, { timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       resolve({
         stdout: stdout?.trim() || '',
-        stderr: stderr?.trim() || (err ? err.message : ''),
-        exitCode: err ? (typeof exitCode === 'number' ? exitCode : 1) : 0,
+        stderr: stderr?.trim() || '',
+        exitCode: err ? 1 : 0,
+        errorMessage: err ? err.message : '',
       });
     });
   });
+}
+
+/** Ensure generated source/dist directories and tsconfig exist. */
+function ensureGeneratedDirs(): void {
+  fs.mkdirSync(GENERATED_SOURCE_DIR, { recursive: true });
+  fs.mkdirSync(GENERATED_DIST_DIR, { recursive: true });
+
+  const tsconfigPath = path.join(GENERATED_SOURCE_DIR, 'tsconfig.generated.json');
+  if (!fs.existsSync(tsconfigPath)) {
+    const relativeOutDir = path.relative(GENERATED_SOURCE_DIR, GENERATED_DIST_DIR);
+    const config = {
+      compilerOptions: {
+        target: 'ES2020',
+        module: 'commonjs',
+        lib: ['ES2020'],
+        esModuleInterop: true,
+        skipLibCheck: true,
+        strict: false,
+        noImplicitAny: false,
+        declaration: false,
+        declarationMap: false,
+        sourceMap: false,
+        outDir: relativeOutDir,
+        rootDir: '.',
+        moduleResolution: 'node',
+        types: ['node'],
+      },
+      include: ['*.ts'],
+    };
+    fs.writeFileSync(tsconfigPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  }
 }
 
 /** Derive a filename slug from an app name. */
@@ -182,9 +214,8 @@ export async function generateSkill(
     };
   }
 
-  // Ensure generated directories exist
-  fs.mkdirSync(GENERATED_SOURCE_DIR, { recursive: true });
-  fs.mkdirSync(GENERATED_DIST_DIR, { recursive: true });
+  // Ensure generated directories and tsconfig exist
+  ensureGeneratedDirs();
 
   const slug = toSlug(appName);
   const sourceFile = path.join(GENERATED_SOURCE_DIR, `${slug}-skill.ts`);
@@ -200,14 +231,39 @@ export async function generateSkill(
   ];
 
   let lastError = '';
+  let useJavaScript = false;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    log(`[generator] Attempt ${attempt}/${MAX_ATTEMPTS} for "${appName}"`);
+    log(`[generator] Attempt ${attempt}/${MAX_ATTEMPTS} for "${appName}"${useJavaScript ? ' (JavaScript mode)' : ''}`);
+
+    // --- Switch to JavaScript on attempt 4 ---
+    if (attempt === 4 && !useJavaScript) {
+      useJavaScript = true;
+      conversation.push({
+        role: 'user',
+        content: `TypeScript compilation has failed ${attempt - 1} times. Generate the skill as PLAIN JAVASCRIPT instead. Same structure, same ok()/fail() pattern, same CLI parsing — but as a .js file that can run directly with node. Return ONLY JavaScript code.`,
+      });
+    }
 
     // --- Step 2: Call Claude ---
     let code: string;
     try {
-      code = await sendMessage(systemPrompt, conversation);
+      const response = await sendMessageWithMeta(systemPrompt, conversation, GENERATION_MAX_TOKENS);
+      code = response.text;
+
+      if (response.truncated) {
+        log(`[generator] Response truncated at ${response.outputTokens} tokens — requesting continuation`);
+        conversation.push({ role: 'assistant', content: code });
+        conversation.push({
+          role: 'user',
+          content: 'Your code was truncated mid-line. Continue EXACTLY from where you stopped. Output ONLY the remaining code starting from the exact cut-off point. Do not repeat any code that was already generated.',
+        });
+        const cont = await sendMessageWithMeta(systemPrompt, conversation, GENERATION_MAX_TOKENS);
+        code = code + cont.text;
+        // Remove the continuation messages from conversation (keep it clean for fix prompts)
+        conversation.pop();
+        conversation.pop();
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       logError(`[generator] LLM call failed: ${msg}`);
@@ -218,34 +274,37 @@ export async function generateSkill(
     code = stripCodeFences(code);
     conversation.push({ role: 'assistant', content: code });
 
-    // --- Step 3: Save the generated code ---
-    fs.writeFileSync(sourceFile, code, 'utf8');
-    log(`[generator] Saved source to ${sourceFile}`);
+    if (useJavaScript) {
+      // --- JavaScript path: skip compilation, write .js directly ---
+      fs.writeFileSync(distFile, code, 'utf8');
+      log(`[generator] Saved JavaScript directly to ${distFile}`);
+    } else {
+      // --- TypeScript path: save source then compile ---
+      fs.writeFileSync(sourceFile, code, 'utf8');
+      log(`[generator] Saved source to ${sourceFile}`);
 
-    // --- Step 4: Compile ---
-    const compileResult = await runCmd('npx', [
-      'tsc',
-      '--esModuleInterop',
-      '--module', 'commonjs',
-      '--target', 'es2020',
-      '--outDir', GENERATED_DIST_DIR,
-      '--rootDir', GENERATED_SOURCE_DIR,
-      '--skipLibCheck',
-      sourceFile,
-    ], COMPILE_TIMEOUT);
+      const tsconfigPath = path.join(GENERATED_SOURCE_DIR, 'tsconfig.generated.json');
+      const compileResult = await runCmd('npx', [
+        'tsc',
+        '--project', tsconfigPath,
+      ], COMPILE_TIMEOUT);
 
-    if (compileResult.exitCode !== 0) {
-      lastError = `Compilation failed:\n${compileResult.stderr || compileResult.stdout}`;
-      log(`[generator] Compile failed (attempt ${attempt}): ${lastError.substring(0, 200)}`);
+      if (compileResult.exitCode !== 0) {
+        const errorParts = [compileResult.stdout, compileResult.stderr]
+          .filter(Boolean)
+          .join('\n');
+        lastError = `Compilation failed:\n${errorParts || compileResult.errorMessage || 'Unknown error'}`;
+        log(`[generator] Compile failed (attempt ${attempt}): ${lastError.substring(0, 1000)}`);
 
-      // Send fix prompt
-      conversation.push({ role: 'user', content: buildFixPrompt(lastError) });
-      continue;
+        // Send fix prompt with full error output
+        conversation.push({ role: 'user', content: buildFixPrompt(lastError, attempt) });
+        continue;
+      }
+
+      log(`[generator] Compiled successfully`);
     }
 
-    log(`[generator] Compiled successfully`);
-
-    // --- Step 4b: Test with a safe command ---
+    // --- Test with a safe command ---
     const commands = extractCommands(code);
     const testCmd = pickTestCommand(commands);
     log(`[generator] Testing with command: ${testCmd}`);
@@ -269,12 +328,12 @@ export async function generateSkill(
     }
 
     if (!testPassed) {
-      log(`[generator] Test failed (attempt ${attempt}): ${lastError.substring(0, 200)}`);
-      conversation.push({ role: 'user', content: buildFixPrompt(testOutput) });
+      log(`[generator] Test failed (attempt ${attempt}): ${lastError.substring(0, 1000)}`);
+      conversation.push({ role: 'user', content: buildFixPrompt(testOutput, attempt) });
       continue;
     }
 
-    // --- Step 5: Success! Register the skill ---
+    // --- Success! Register the skill ---
     const entry: SkillEntry = {
       app: appName,
       aliases: [],
@@ -291,7 +350,7 @@ export async function generateSkill(
 
     return {
       success: true,
-      skillFile: sourceFile,
+      skillFile: useJavaScript ? distFile : sourceFile,
       registryEntry: entry,
       attempts: attempt,
     };

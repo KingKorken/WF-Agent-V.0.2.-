@@ -111,9 +111,17 @@ Return ONLY the TypeScript code, no markdown fences, no explanation.`;
  * Build a follow-up prompt when a generation attempt fails.
  * Sent in the same conversation so Claude has context of its previous code.
  */
-export function buildFixPrompt(error: string): string {
-  return `The skill failed with this error:
+export function buildFixPrompt(error: string, attemptNumber: number): string {
+  return `ATTEMPT ${attemptNumber} FAILED.
+
+ERROR OUTPUT:
 ${error}
 
-Fix the code. Return ONLY the corrected TypeScript code, no markdown fences, no explanation.`;
+INSTRUCTIONS:
+1. Analyze the FULL error output above carefully
+2. Fix ALL errors, not just the first one
+3. Make sure all imports are from Node.js built-in modules only
+4. Make sure the code compiles with --strict false --target ES2020 --module commonjs
+5. Return the COMPLETE fixed TypeScript file — not just the changed parts
+6. Return ONLY TypeScript code, no markdown fences, no explanation`;
 }
