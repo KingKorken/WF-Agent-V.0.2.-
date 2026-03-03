@@ -18,7 +18,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   setStatus: (status) =>
     set({
       status,
-      lastConnected: status === 'connected' ? new Date() : undefined,
+      lastConnected: status === 'connected' ? new Date() : null,
     }),
   incrementReconnect: () =>
     set((state) => ({ reconnectAttempts: state.reconnectAttempts + 1 })),

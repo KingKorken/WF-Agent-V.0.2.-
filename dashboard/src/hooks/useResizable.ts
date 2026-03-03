@@ -1,7 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+const SIDEBAR_WIDTH_KEY = 'wfa-sidebar-width';
+
 export function useResizable(initialWidth: number, minWidth: number, maxWidth: number) {
-  const [width, setWidth] = useState(initialWidth);
+  const [width, setWidth] = useState(() => {
+    const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (saved) {
+      const parsed = parseInt(saved, 10);
+      if (!isNaN(parsed) && parsed >= minWidth && parsed <= maxWidth) {
+        // Also set the CSS variable on initial load
+        document.documentElement.style.setProperty('--sidebar-width', `${parsed}px`);
+        return parsed;
+      }
+    }
+    return initialWidth;
+  });
   const isDragging = useRef(false);
   const startX = useRef(0);
   const startWidth = useRef(0);
@@ -31,6 +44,14 @@ export function useResizable(initialWidth: number, minWidth: number, maxWidth: n
       isDragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      // Persist sidebar width
+      const currentWidth = parseInt(
+        document.documentElement.style.getPropertyValue('--sidebar-width') || `${initialWidth}`,
+        10
+      );
+      if (!isNaN(currentWidth)) {
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(currentWidth));
+      }
     };
 
     document.addEventListener('mousemove', handleMouseMove);
@@ -39,7 +60,7 @@ export function useResizable(initialWidth: number, minWidth: number, maxWidth: n
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [minWidth, maxWidth]);
+  }, [minWidth, maxWidth, initialWidth]);
 
   return { width, handleMouseDown };
 }

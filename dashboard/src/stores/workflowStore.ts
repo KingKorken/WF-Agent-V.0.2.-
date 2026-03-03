@@ -29,6 +29,9 @@ interface WorkflowState {
   queueWorkflow: (workflow: QueuedWorkflow) => void;
   removeFromQueue: (workflowId: string) => void;
   updateQueueProgress: (workflowId: string, progress: string, currentStep: string) => void;
+  startExecution: (workflowId: string) => void;
+  completeExecution: (workflowId: string) => void;
+  cancelQueued: (workflowId: string) => void;
 }
 
 // Mock data for development — remove when connecting to real API
@@ -71,6 +74,42 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
       const newQueue = state.queue.map((q) =>
         q.workflowId === workflowId ? { ...q, progress, currentStep } : q
       );
+      return {
+        queue: newQueue,
+        executingWorkflow: newQueue.find((q) => q.position === 0) ?? null,
+      };
+    }),
+
+  startExecution: (workflowId) =>
+    set((state) => {
+      const newQueue = state.queue.map((q) =>
+        q.workflowId === workflowId ? { ...q, position: 0 } : q
+      );
+      return {
+        queue: newQueue,
+        executingWorkflow: newQueue.find((q) => q.position === 0) ?? null,
+      };
+    }),
+
+  completeExecution: (workflowId) =>
+    set((state) => {
+      const newQueue = state.queue.filter((q) => q.workflowId !== workflowId);
+      // Promote next in queue to position 0
+      const nextQueue = newQueue.map((q, i) => ({
+        ...q,
+        position: i,
+      }));
+      return {
+        queue: nextQueue,
+        executingWorkflow: nextQueue.find((q) => q.position === 0) ?? null,
+      };
+    }),
+
+  cancelQueued: (workflowId) =>
+    set((state) => {
+      const newQueue = state.queue
+        .filter((q) => q.workflowId !== workflowId)
+        .map((q, i) => ({ ...q, position: i }));
       return {
         queue: newQueue,
         executingWorkflow: newQueue.find((q) => q.position === 0) ?? null,

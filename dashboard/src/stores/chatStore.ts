@@ -32,6 +32,7 @@ interface ChatState {
   switchConversation: (id: string) => void;
   setDraft: (conversationId: string, text: string) => void;
   getDraft: (conversationId: string) => string;
+  receiveMessage: (conversationId: string, message: ChatMessage) => void;
 }
 
 function generateId(): string {
@@ -125,5 +126,15 @@ export const useChatStore = create<ChatState>((set, get) => {
       })),
 
     getDraft: (conversationId) => get().drafts[conversationId] || '',
+
+    receiveMessage: (conversationId, message) =>
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId
+            ? { ...c, messages: [...c.messages, message] }
+            : c
+        ),
+        isAgentTyping: false,
+      })),
   };
 });
