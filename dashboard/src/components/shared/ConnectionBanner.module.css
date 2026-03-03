@@ -1,0 +1,10 @@
+.banner {
+  padding: var(--space-xs) var(--space-sm);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-error);
+  text-align: center;
+  border-bottom: 1px solid var(--color-divider);
+  flex-shrink: 0;
+}

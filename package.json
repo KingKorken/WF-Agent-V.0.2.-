@@ -11,7 +11,9 @@
   ],
   "scripts": {
     "agent:dev": "npm run dev --workspace=local-agent",
-    "agent:test-server": "npm run test-server --workspace=local-agent"
+    "agent:test-server": "npm run test-server --workspace=local-agent",
+    "dashboard:dev": "npm run dev --workspace=dashboard",
+    "dashboard:build": "npm run build --workspace=dashboard"
   },
   "engines": {
     "node": ">=18.0.0"

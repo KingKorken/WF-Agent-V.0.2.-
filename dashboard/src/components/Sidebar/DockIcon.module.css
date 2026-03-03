@@ -1,0 +1,31 @@
+.icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  background: rgba(0, 0, 0, 0.05);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  padding: 8px;
+  color: var(--color-text);
+
+  /* GPU layer for smooth animation */
+  will-change: transform, opacity;
+  transform: translateZ(0);
+  transition:
+    transform var(--duration-normal) var(--ease-out-quad),
+    box-shadow var(--duration-normal) var(--ease-out-quad),
+    opacity var(--duration-normal) var(--ease-out-quad);
+}
+
+.icon:hover {
+  transform: scale(var(--dock-hover-scale)) translateZ(0);
+  box-shadow: var(--dock-hover-glow);
+}
+
+.icon svg {
+  width: 24px;
+  height: 24px;
+}

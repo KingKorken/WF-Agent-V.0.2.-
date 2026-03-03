@@ -1,0 +1,16 @@
+.tabBar {
+  flex-shrink: 0;
+}
+
+.tabs {
+  display: flex;
+  gap: var(--space-lg);
+  padding: var(--space-xs) var(--space-sm) 0;
+  align-items: baseline;
+}
+
+.line {
+  height: 1px;
+  background: var(--color-divider);
+  margin-top: var(--space-xs);
+}

@@ -1,0 +1,18 @@
+.profile {
+  background: none;
+  border: none;
+  padding: var(--space-xs) var(--space-sm);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  text-align: left;
+  border-radius: var(--radius);
+  flex-shrink: 0;
+  transition: background var(--duration-instant) var(--ease-out-quad);
+}
+
+.profile:hover {
+  background: rgba(0, 0, 0, 0.04);
+}

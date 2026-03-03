@@ -1,0 +1,28 @@
+.button {
+  background: none;
+  border: none;
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-accent);
+  cursor: pointer;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius);
+  white-space: nowrap;
+  transition: opacity var(--duration-fast) var(--ease-out-quad);
+}
+
+.button:hover {
+  opacity: 0.8;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error {
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}

@@ -1,0 +1,5 @@
+.timeline {
+  flex: 1;
+  overflow: hidden;
+  padding: 0 var(--space-xl) var(--space-lg);
+}

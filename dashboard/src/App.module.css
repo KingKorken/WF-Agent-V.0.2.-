@@ -1,0 +1,22 @@
+.root {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.root[data-has-queue="true"] {
+  grid-template-columns: var(--sidebar-width) var(--queue-panel-width) 1fr;
+}
+
+.canvasWrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.canvas {
+  flex: 1;
+  overflow: hidden;
+}

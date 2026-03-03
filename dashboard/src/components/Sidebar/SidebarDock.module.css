@@ -1,0 +1,12 @@
+.dock {
+  display: flex;
+  gap: var(--space-lg);
+  justify-content: center;
+  padding: var(--space-sm) 0;
+  flex-shrink: 0;
+}
+
+/* Neighbor dimming: when any icon is hovered, all non-hovered icons dim */
+.dock:has([data-dock-icon]:hover) [data-dock-icon]:not(:hover) {
+  opacity: var(--dock-neighbor-dim);
+}

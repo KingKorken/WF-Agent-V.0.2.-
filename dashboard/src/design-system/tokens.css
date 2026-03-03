@@ -1,0 +1,52 @@
+:root {
+  /* Colors — exactly 3 + error */
+  --color-bg: #E0E0E0;
+  --color-text: #0A0A0A;
+  --color-text-secondary: #1A1A1A;
+  --color-accent: #C55A2B;
+  --color-error: #D32F2F;
+  --color-divider: rgba(0, 0, 0, 0.12);
+
+  /* Spacing — 8px base, all multiples of 8 */
+  --space-xs: 8px;
+  --space-sm: 16px;
+  --space-md: 24px;
+  --space-lg: 32px;
+  --space-xl: 40px;
+
+  /* Typography */
+  --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-bold: 700;
+  --font-size-xs: 11px;
+  --font-size-sm: 13px;
+  --font-size-base: 15px;
+  --font-size-lg: 18px;
+  --font-size-xl: 24px;
+  --font-size-xxl: 32px;
+  --line-height-tight: 1.2;
+  --line-height-base: 1.5;
+  --line-height-relaxed: 1.7;
+
+  /* Layout */
+  --sidebar-width: 280px;
+  --sidebar-min-width: 220px;
+  --sidebar-max-width: 480px;
+  --queue-panel-width: 200px;
+  --tab-bar-height: 40px;
+
+  /* Border */
+  --radius: 4px;
+
+  /* Motion */
+  --ease-out-quad: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --duration-instant: 80ms;
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+
+  /* Dock hover */
+  --dock-hover-scale: 1.06;
+  --dock-hover-glow: 0 0 12px rgba(197, 90, 43, 0.4);
+  --dock-neighbor-dim: 0.6;
+}

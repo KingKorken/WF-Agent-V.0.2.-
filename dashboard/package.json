@@ -3,8 +3,25 @@
   "version": "0.1.0",
   "description": "Frontend web application — workflow management, agent chat, audit log",
   "private": true,
+  "type": "module",
   "scripts": {
-    "build": "echo 'Dashboard not yet implemented — see implementation briefs'",
-    "dev": "echo 'Dashboard not yet implemented — see implementation briefs'"
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0",
+    "react-window": "^1.8.11",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/react-window": "^1.8.8",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
   }
 }

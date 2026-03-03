@@ -1,0 +1,8 @@
+.greeting {
+  font-family: var(--font-family);
+  font-size: var(--font-size-xxl);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text);
+  text-align: center;
+  line-height: var(--line-height-tight);
+}

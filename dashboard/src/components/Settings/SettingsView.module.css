@@ -1,0 +1,91 @@
+.root {
+  max-width: 600px;
+  padding: var(--space-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+}
+
+.heading {
+  font-family: var(--font-family);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.sectionTitle {
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text);
+}
+
+.label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.input {
+  padding: var(--space-sm);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.5);
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  outline: none;
+  max-width: 300px;
+}
+
+.input:focus {
+  border-color: rgba(0, 0, 0, 0.3);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.appList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.app {
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  padding: var(--space-xs) 0;
+}
+
+.replayButton {
+  background: none;
+  border: none;
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: var(--space-xs) 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.replayButton:hover {
+  color: var(--color-text);
+}

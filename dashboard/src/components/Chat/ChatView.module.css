@@ -1,0 +1,40 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.messagesArea {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-xl);
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: var(--space-xl);
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.typingIndicator {
+  padding: var(--space-xs) 0;
+}
+
+.inputArea {
+  flex-shrink: 0;
+  padding: var(--space-sm) var(--space-xl) var(--space-lg);
+  max-width: 720px;
+  margin: 0 auto;
+  width: 100%;
+}
