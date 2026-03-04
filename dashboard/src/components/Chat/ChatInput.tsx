@@ -47,6 +47,7 @@ export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
         placeholder="How can I help you today?"
         rows={1}
         disabled={disabled}
+        autoFocus
         aria-label="Message input"
       />
       <button

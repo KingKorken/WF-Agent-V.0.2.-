@@ -9,7 +9,11 @@ import { LoadingDots } from '../shared/LoadingDots';
 import styles from './ChatView.module.css';
 
 export function ChatView() {
-  const conversation = useChatStore((s) => s.getActiveConversation());
+  // Derive conversation directly in selector instead of calling getActiveConversation()
+  // which creates a new object reference on every store update, defeating Zustand memoization
+  const conversation = useChatStore((s) =>
+    s.conversations.find((c) => c.id === s.activeConversationId)
+  );
   const isAgentTyping = useChatStore((s) => s.isAgentTyping);
   const suggestionsVisible = useChatStore((s) => s.suggestionsVisible);
   const sendMessage = useChatStore((s) => s.sendMessage);
@@ -30,6 +34,7 @@ export function ChatView() {
           <div className={styles.emptyState}>
             <ChatGreeting />
             {suggestionsVisible && <ChatSuggestions onSelect={sendMessage} />}
+            <ChatInput onSend={sendMessage} disabled={isAgentTyping} />
           </div>
         )}
         {!isEmpty && (
@@ -46,9 +51,11 @@ export function ChatView() {
           </div>
         )}
       </div>
-      <div className={styles.inputArea}>
-        <ChatInput onSend={sendMessage} disabled={isAgentTyping} />
-      </div>
+      {!isEmpty && (
+        <div className={styles.inputArea}>
+          <ChatInput onSend={sendMessage} disabled={isAgentTyping} />
+        </div>
+      )}
     </div>
   );
 }

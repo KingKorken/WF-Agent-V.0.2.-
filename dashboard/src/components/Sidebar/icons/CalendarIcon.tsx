@@ -23,7 +23,7 @@ export function CalendarIcon() {
         {dayName}
       </span>
       <span style={{
-        fontSize: 32,
+        fontSize: 40,
         color: 'black',
         fontFamily: 'Inter, Helvetica, sans-serif',
         fontWeight: 300,

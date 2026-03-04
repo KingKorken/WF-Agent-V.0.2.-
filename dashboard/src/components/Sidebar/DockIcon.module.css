@@ -24,8 +24,3 @@
   transform: scale(var(--dock-hover-scale)) translateZ(0);
   box-shadow: var(--dock-hover-glow);
 }
-
-.icon svg {
-  width: 100%;
-  height: 100%;
-}

@@ -29,12 +29,12 @@ export function WorkflowLibraryIcon() {
         gridTemplateRows: 'repeat(2, 9px)',
         gap: 5,
       }}>
-        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'linear-gradient(to bottom, #c13888, #ff48b3)' }} />
-        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'linear-gradient(to bottom, #26a0cc, #13c1ff)' }} />
-        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'linear-gradient(to bottom, #855699, #b173cc)' }} />
-        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'linear-gradient(to bottom, #007151, #00d79a)' }} />
-        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'linear-gradient(to bottom, #b5b5b5, #d9d9d9)' }} />
-        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'linear-gradient(to bottom, #d07100, #ff8a00)' }} />
+        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'radial-gradient(circle, #ff48b3, #c13888)' }} />
+        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'radial-gradient(circle, #13c1ff, #26a0cc)' }} />
+        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'radial-gradient(circle, #b173cc, #855699)' }} />
+        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'radial-gradient(circle, #00d79a, #007151)' }} />
+        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'radial-gradient(circle, #d9d9d9, #b5b5b5)' }} />
+        <div style={{ width: 9, height: 9, borderRadius: 2, background: 'radial-gradient(circle, #ff8a00, #d07100)' }} />
       </div>
     </div>
   );
