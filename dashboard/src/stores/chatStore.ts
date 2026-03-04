@@ -100,6 +100,31 @@ export const useChatStore = create<ChatState>((set, get) => {
         agentProgress: null,
       }));
 
+      // On deployed environments, respond locally — no bridge server available
+      if (wsService.deployed) {
+        const systemReply: ChatMessage = {
+          id: generateId(),
+          role: 'system',
+          type: 'text',
+          content:
+            'This is a cloud preview of the dashboard. To interact with the agent, run the app locally:\n\n' +
+            '1. `npm run server:dev`  — start the bridge server\n' +
+            '2. `npm run agent:dev`   — start the local agent\n' +
+            '3. `npm run dashboard:dev` — open the dashboard\n\n' +
+            'See the README for full setup instructions.',
+          timestamp: new Date(),
+        };
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === activeConversationId
+              ? { ...c, messages: [...c.messages, systemReply] }
+              : c
+          ),
+          isAgentTyping: false,
+        }));
+        return;
+      }
+
       // Send to bridge server
       const DIRECT_PREFIXES = ['/shell ', '/browser ', '/ax ', '/vision '];
       const isDirect = DIRECT_PREFIXES.some((p) => content.trimStart().startsWith(p));
