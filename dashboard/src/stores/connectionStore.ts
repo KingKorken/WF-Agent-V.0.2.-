@@ -7,6 +7,8 @@ interface ConnectionState {
   status: ConnectionStatus;
   lastConnected: Date | null;
   reconnectAttempts: number;
+  /** True once a successful connection has been made this session */
+  hasConnectedOnce: boolean;
 
   /** Whether the local agent is connected to the bridge */
   agentConnected: boolean;
@@ -23,15 +25,17 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   status: 'disconnected',
   lastConnected: null,
   reconnectAttempts: 0,
+  hasConnectedOnce: false,
   agentConnected: false,
   agentName: null,
   supportedLayers: [],
 
   setStatus: (status) =>
-    set({
+    set((state) => ({
       status,
-      lastConnected: status === 'connected' ? new Date() : null,
-    }),
+      lastConnected: status === 'connected' ? new Date() : state.lastConnected,
+      hasConnectedOnce: state.hasConnectedOnce || status === 'connected',
+    })),
   incrementReconnect: () =>
     set((state) => ({ reconnectAttempts: state.reconnectAttempts + 1 })),
   resetReconnect: () => set({ reconnectAttempts: 0 }),

@@ -9,6 +9,7 @@ class WebSocketService {
   private handlers: Set<MessageHandler> = new Set();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private maxReconnectDelay = 30000;
+  private maxReconnectAttempts = 5;
 
   constructor(url: string) {
     this.url = url;
@@ -51,6 +52,13 @@ class WebSocketService {
 
   private scheduleReconnect(): void {
     const store = useConnectionStore.getState();
+
+    // Stop retrying after max attempts (prevents infinite reconnect on Vercel/deployed)
+    if (store.reconnectAttempts >= this.maxReconnectAttempts) {
+      store.setStatus('disconnected');
+      return;
+    }
+
     store.incrementReconnect();
     const delay = Math.min(
       1000 * Math.pow(2, store.reconnectAttempts),
