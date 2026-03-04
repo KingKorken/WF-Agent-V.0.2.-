@@ -9,6 +9,8 @@ interface ConnectionState {
   reconnectAttempts: number;
   /** True once a successful connection has been made this session */
   hasConnectedOnce: boolean;
+  /** True when running on a deployed host (Vercel) — no bridge server available */
+  isDeployed: boolean;
 
   /** Whether the local agent is connected to the bridge */
   agentConnected: boolean;
@@ -16,6 +18,7 @@ interface ConnectionState {
   supportedLayers: string[];
 
   setStatus: (status: ConnectionStatus) => void;
+  setDeployed: () => void;
   incrementReconnect: () => void;
   resetReconnect: () => void;
   setAgentStatus: (connected: boolean, name: string | null, layers: string[]) => void;
@@ -26,6 +29,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   lastConnected: null,
   reconnectAttempts: 0,
   hasConnectedOnce: false,
+  isDeployed: false,
   agentConnected: false,
   agentName: null,
   supportedLayers: [],
@@ -36,6 +40,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
       lastConnected: status === 'connected' ? new Date() : state.lastConnected,
       hasConnectedOnce: state.hasConnectedOnce || status === 'connected',
     })),
+  setDeployed: () => set({ isDeployed: true, status: 'disconnected' }),
   incrementReconnect: () =>
     set((state) => ({ reconnectAttempts: state.reconnectAttempts + 1 })),
   resetReconnect: () => set({ reconnectAttempts: 0 }),

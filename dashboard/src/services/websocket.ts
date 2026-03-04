@@ -3,21 +3,39 @@ import { useConnectionStore } from '../stores/connectionStore';
 
 type MessageHandler = (message: WebSocketMessage) => void;
 
+/**
+ * Detect whether the dashboard is running on a deployed host (Vercel, Netlify, etc.)
+ * vs. locally. On deployed hosts there is no bridge server to connect to, so we
+ * skip WebSocket connections entirely and show "Cloud preview" status.
+ */
+function isDeployedEnvironment(): boolean {
+  const host = window.location.hostname;
+  return host !== 'localhost' && host !== '127.0.0.1' && !host.startsWith('192.168.');
+}
+
 class WebSocketService {
   private ws: WebSocket | null = null;
   private url: string;
   private handlers: Set<MessageHandler> = new Set();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private maxReconnectDelay = 30000;
-  // Allow more reconnect attempts locally (services may start at different times)
-  // On Vercel/deployed, we'll detect "never connected" and show appropriate status
   private maxReconnectAttempts = 15;
+  /** True when running on Vercel/deployed — skip all WS connections */
+  readonly deployed: boolean;
 
   constructor(url: string) {
     this.url = url;
+    this.deployed = isDeployedEnvironment();
   }
 
   connect(): void {
+    // On deployed environments, don't attempt WebSocket connections at all.
+    // There is no bridge server — ws://localhost would point at the visitor's machine.
+    if (this.deployed) {
+      useConnectionStore.getState().setDeployed();
+      return;
+    }
+
     const store = useConnectionStore.getState();
     store.setStatus('connecting');
 
@@ -55,7 +73,7 @@ class WebSocketService {
   private scheduleReconnect(): void {
     const store = useConnectionStore.getState();
 
-    // Stop retrying after max attempts (prevents infinite reconnect on Vercel/deployed)
+    // Stop retrying after max attempts
     if (store.reconnectAttempts >= this.maxReconnectAttempts) {
       store.setStatus('disconnected');
       return;

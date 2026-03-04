@@ -7,14 +7,18 @@ export function SidebarProfile() {
   const openTab = useTabStore((s) => s.openTab);
   const userName = useSettingsStore((s) => s.userName);
   const status = useConnectionStore((s) => s.status);
+  const isDeployed = useConnectionStore((s) => s.isDeployed);
   const agentConnected = useConnectionStore((s) => s.agentConnected);
   const agentName = useConnectionStore((s) => s.agentName);
 
-  // Connection state: grey (disconnected), yellow (bridge only), green (agent online)
+  // Connection state: blue (deployed/cloud), grey (disconnected), yellow (bridge only), green (agent online)
   let dotColor: string;
   let statusLabel: string;
 
-  if (status !== 'connected') {
+  if (isDeployed) {
+    dotColor = styles.blue;
+    statusLabel = 'Cloud preview';
+  } else if (status !== 'connected') {
     dotColor = styles.grey;
     statusLabel = status === 'connecting' ? 'Connecting...' : 'Disconnected';
   } else if (!agentConnected) {
