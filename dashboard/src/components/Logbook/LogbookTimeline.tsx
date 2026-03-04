@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef, useCallback, useState, useEffect } from 'react';
 import { VariableSizeList as List } from 'react-window';
 import type { AuditEntry } from '../../stores/logbookStore';
 import { LogbookEntry } from './LogbookEntry';
@@ -8,13 +8,30 @@ interface LogbookTimelineProps {
   entries: AuditEntry[];
 }
 
-const COLLAPSED_HEIGHT = 36; // Height of a collapsed entry row
-const EXPANDED_HEIGHT = 280; // Approximate height of an expanded entry
+const COLLAPSED_HEIGHT = 36;
+const EXPANDED_HEIGHT = 280;
 
 export function LogbookTimeline({ entries }: LogbookTimelineProps) {
   const listRef = useRef<List>(null);
   const expandedSet = useRef<Set<string>>(new Set());
   const containerRef = useRef<HTMLDivElement>(null);
+  const [containerHeight, setContainerHeight] = useState(600);
+
+  // Observe container so the virtual list always fills available space
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const observer = new ResizeObserver((observed) => {
+      for (const entry of observed) {
+        const h = entry.contentRect.height;
+        if (h > 0) setContainerHeight(h);
+      }
+    });
+    observer.observe(el);
+    if (el.clientHeight > 0) setContainerHeight(el.clientHeight);
+    return () => observer.disconnect();
+  }, []);
 
   const getItemSize = useCallback(
     (index: number) => {
@@ -32,7 +49,6 @@ export function LogbookTimeline({ entries }: LogbookTimelineProps) {
       } else {
         expandedSet.current.add(entryId);
       }
-      // Reset the cached size for this item and re-render
       listRef.current?.resetAfterIndex(index);
     },
     [],
@@ -42,7 +58,7 @@ export function LogbookTimeline({ entries }: LogbookTimelineProps) {
     <div className={styles.timeline} ref={containerRef}>
       <List
         ref={listRef}
-        height={containerRef.current?.clientHeight ?? 600}
+        height={containerHeight}
         itemCount={entries.length}
         itemSize={getItemSize}
         width="100%"

@@ -1,19 +1,19 @@
 import { useState } from 'react';
-import styles from './CalendarView.module.css';
+import styles from './EmailView.module.css';
 
-interface CalendarService {
+interface EmailService {
   id: string;
   name: string;
   description: string;
 }
 
-const CALENDAR_SERVICES: CalendarService[] = [
-  { id: 'apple', name: 'Apple Calendar', description: 'Sync with your iCloud calendar' },
-  { id: 'outlook', name: 'Outlook Calendar', description: 'Connect your Microsoft 365 calendar' },
-  { id: 'google', name: 'Google Calendar', description: 'Link your Google Workspace calendar' },
+const EMAIL_SERVICES: EmailService[] = [
+  { id: 'outlook', name: 'Microsoft Outlook', description: 'Connect your Outlook or Microsoft 365 email' },
+  { id: 'gmail', name: 'Google Gmail', description: 'Connect your Google Workspace or personal Gmail' },
+  { id: 'apple', name: 'Apple Mail (iCloud)', description: 'Connect your iCloud email account' },
 ];
 
-export function CalendarView() {
+export function EmailView() {
   const [connecting, setConnecting] = useState<string | null>(null);
   const [connected, setConnected] = useState<Set<string>>(new Set());
 
@@ -29,12 +29,12 @@ export function CalendarView() {
   return (
     <div className={styles.root}>
       <div className={styles.centered}>
-        <h2 className={styles.title}>Calendar</h2>
+        <h2 className={styles.title}>Email</h2>
         <p className={styles.subtitle}>
-          Connect your calendar to let the agent schedule workflows and view upcoming events.
+          Connect your email account so the agent can read, organize, and draft emails as part of your workflows.
         </p>
         <div className={styles.services}>
-          {CALENDAR_SERVICES.map((service) => {
+          {EMAIL_SERVICES.map((service) => {
             const isConnected = connected.has(service.id);
             const isConnecting = connecting === service.id;
 
@@ -57,7 +57,7 @@ export function CalendarView() {
         </div>
         <p className={styles.note}>
           Your credentials are stored locally and never sent to our servers.
-          The agent accesses your calendar only when executing a workflow you have approved.
+          The agent accesses email only when executing a workflow you have approved.
         </p>
       </div>
     </div>

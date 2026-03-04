@@ -7,6 +7,7 @@ import { LogbookView } from './components/Logbook/LogbookView';
 import { RecordView } from './components/Record/RecordView';
 import { SettingsView } from './components/Settings/SettingsView';
 import { CalendarView } from './components/Calendar/CalendarView';
+import { EmailView } from './components/Email/EmailView';
 import { ConnectionBanner } from './components/shared/ConnectionBanner';
 import { OnboardingOverlay } from './components/Onboarding/OnboardingOverlay';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -104,11 +105,7 @@ export function App() {
             {activeTabId === 'record' && <RecordView />}
             {activeTabId === 'settings' && <SettingsView />}
             {activeTabId === 'calendar' && <CalendarView />}
-            {activeTabId === 'email' && (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: 'var(--color-bg)' }}>
-                <p style={{ color: 'var(--color-text-secondary)', opacity: 0.6 }}>Email integration coming soon.</p>
-              </div>
-            )}
+            {activeTabId === 'email' && <EmailView />}
           </div>
         </div>
         <OnboardingOverlay />
