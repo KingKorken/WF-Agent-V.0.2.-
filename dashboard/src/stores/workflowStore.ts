@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { wsService } from '../services/websocket';
 
 export type WorkflowStatus = 'active' | 'failed-last-run' | 'never-run';
 
@@ -32,6 +33,7 @@ interface WorkflowState {
   startExecution: (workflowId: string) => void;
   completeExecution: (workflowId: string) => void;
   cancelQueued: (workflowId: string) => void;
+  runWorkflow: (workflowId: string) => void;
 }
 
 // Mock data for development — remove when connecting to real API
@@ -115,4 +117,28 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
         executingWorkflow: newQueue.find((q) => q.position === 0) ?? null,
       };
     }),
+
+  runWorkflow: (workflowId) => {
+    const { workflows, queue } = useWorkflowStore.getState();
+    const workflow = workflows.find((w) => w.id === workflowId);
+    if (!workflow) return;
+
+    // Don't queue if already queued
+    if (queue.some((q) => q.workflowId === workflowId)) return;
+
+    const queued: QueuedWorkflow = {
+      workflowId,
+      name: workflow.name,
+      progress: '0/0',
+      currentStep: 'Starting...',
+      position: queue.length,
+    };
+
+    useWorkflowStore.getState().queueWorkflow(queued);
+    wsService.send({
+      type: 'dashboard_workflow_run',
+      workflowId,
+      workflowName: workflow.name,
+    });
+  },
 }));

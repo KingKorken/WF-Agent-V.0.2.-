@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { wsService } from '../services/websocket';
 
 export type MessageRole = 'user' | 'agent' | 'system';
 export type MessageType = 'text' | 'progress-card' | 'data-card' | 'error';
@@ -10,6 +11,14 @@ export interface ChatMessage {
   content: string;
   suggestion?: string;
   timestamp: Date;
+}
+
+export interface AgentProgress {
+  step: number;
+  maxSteps: number;
+  thinking: string;
+  action?: string;
+  layer?: string;
 }
 
 export interface Conversation {
@@ -25,6 +34,7 @@ interface ChatState {
   isAgentTyping: boolean;
   suggestionsVisible: boolean;
   drafts: Record<string, string>;
+  agentProgress: AgentProgress | null;
 
   getActiveConversation: () => Conversation | undefined;
   sendMessage: (content: string) => void;
@@ -33,6 +43,7 @@ interface ChatState {
   setDraft: (conversationId: string, text: string) => void;
   getDraft: (conversationId: string) => string;
   receiveMessage: (conversationId: string, message: ChatMessage) => void;
+  setAgentProgress: (conversationId: string, progress: AgentProgress) => void;
 }
 
 function generateId(): string {
@@ -57,6 +68,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     isAgentTyping: false,
     suggestionsVisible: true,
     drafts: {},
+    agentProgress: null,
 
     getActiveConversation: () => {
       const { conversations, activeConversationId } = get();
@@ -85,26 +97,19 @@ export const useChatStore = create<ChatState>((set, get) => {
             : c
         ),
         isAgentTyping: true,
+        agentProgress: null,
       }));
 
-      // Mock agent response after a delay
-      setTimeout(() => {
-        const agentMessage: ChatMessage = {
-          id: generateId(),
-          role: 'agent',
-          type: 'text',
-          content: `I received your message: "${content}". This is a mock response. WebSocket integration will be connected in Phase 4.`,
-          timestamp: new Date(),
-        };
-        set((state) => ({
-          isAgentTyping: false,
-          conversations: state.conversations.map((c) =>
-            c.id === activeConversationId
-              ? { ...c, messages: [...c.messages, agentMessage] }
-              : c
-          ),
-        }));
-      }, 1000 + Math.random() * 1000);
+      // Send to bridge server
+      const DIRECT_PREFIXES = ['/shell ', '/browser ', '/ax ', '/vision '];
+      const isDirect = DIRECT_PREFIXES.some((p) => content.trimStart().startsWith(p));
+      wsService.send({
+        type: 'dashboard_chat',
+        id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        conversationId: activeConversationId,
+        content,
+        isDirect,
+      });
     },
 
     newConversation: () => {
@@ -113,11 +118,12 @@ export const useChatStore = create<ChatState>((set, get) => {
         conversations: [conv, ...state.conversations],
         activeConversationId: conv.id,
         suggestionsVisible: true,
+        agentProgress: null,
       }));
     },
 
     switchConversation: (id) => {
-      set({ activeConversationId: id, suggestionsVisible: false });
+      set({ activeConversationId: id, suggestionsVisible: false, agentProgress: null });
     },
 
     setDraft: (conversationId, text) =>
@@ -135,6 +141,13 @@ export const useChatStore = create<ChatState>((set, get) => {
             : c
         ),
         isAgentTyping: false,
+        agentProgress: null,
       })),
+
+    setAgentProgress: (_conversationId, progress) =>
+      set({
+        agentProgress: progress,
+        isAgentTyping: true,
+      }),
   };
 });

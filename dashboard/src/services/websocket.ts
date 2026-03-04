@@ -78,5 +78,5 @@ class WebSocketService {
 }
 
 // Singleton — URL will come from environment variable
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8765';
 export const wsService = new WebSocketService(WS_URL);

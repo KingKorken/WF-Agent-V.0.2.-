@@ -11,7 +11,7 @@ import { OnboardingOverlay } from './components/Onboarding/OnboardingOverlay';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useTabStore } from './stores/tabStore';
 import { useWorkflowStore } from './stores/workflowStore';
-import { wsService } from './services/websocket';
+import { initMessageRouter } from './services/message-router';
 import styles from './App.module.css';
 
 export function App() {
@@ -40,10 +40,9 @@ export function App() {
     window.location.hash = activeTabId === 'workspace' ? '' : activeTabId;
   }, [activeTabId]);
 
-  // WebSocket auto-connect
+  // Initialize WebSocket connection and message routing
   useEffect(() => {
-    wsService.connect();
-    return () => wsService.disconnect();
+    initMessageRouter();
   }, []);
 
   return (

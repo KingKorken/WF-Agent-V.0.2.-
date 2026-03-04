@@ -5,6 +5,7 @@ import { SidebarConversations } from './SidebarConversations';
 import { WorkflowProgress } from './WorkflowProgress';
 import { SidebarDock } from './SidebarDock';
 import { SidebarProfile } from './SidebarProfile';
+import { ConnectionIndicator } from './ConnectionIndicator';
 import styles from './Sidebar.module.css';
 
 export function Sidebar() {
@@ -23,6 +24,7 @@ export function Sidebar() {
       <WorkflowProgress />
       <div className={styles.divider} />
       <SidebarDock />
+      <ConnectionIndicator />
       <SidebarProfile />
       <div className={styles.resizeHandle} onMouseDown={handleMouseDown} />
     </nav>

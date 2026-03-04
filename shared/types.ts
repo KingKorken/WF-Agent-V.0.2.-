@@ -412,8 +412,94 @@ export interface AgentHello {
   supportedLayers: CommandLayer[];
 }
 
+// ---------------------------------------------------------------------------
+// Dashboard ↔ Server protocol
+// ---------------------------------------------------------------------------
+
+/** Sent by the dashboard when it connects to the bridge server */
+export interface DashboardHello {
+  type: 'dashboard_hello';
+  /** Unique identifier for this dashboard session */
+  dashboardId: string;
+  /** Dashboard version */
+  version: string;
+}
+
+/** Chat message from dashboard to server */
+export interface DashboardChatMessage {
+  type: 'dashboard_chat';
+  /** Unique message ID */
+  id: string;
+  /** Conversation this message belongs to */
+  conversationId: string;
+  /** User's message content */
+  content: string;
+  /** True if this is a direct command (e.g. /shell, /browser, /ax, /vision) */
+  isDirect?: boolean;
+}
+
+/** Request to run a workflow */
+export interface DashboardWorkflowRun {
+  type: 'dashboard_workflow_run';
+  workflowId: string;
+  workflowName: string;
+}
+
+/** Request to cancel a running workflow */
+export interface DashboardWorkflowCancel {
+  type: 'dashboard_workflow_cancel';
+  workflowId: string;
+}
+
+/** Chat response from server to dashboard */
+export interface ServerChatResponse {
+  type: 'server_chat_response';
+  conversationId: string;
+  message: {
+    id: string;
+    role: 'agent' | 'system';
+    type: 'text' | 'progress-card' | 'error';
+    content: string;
+  };
+}
+
+/** Agent thinking/action progress from server to dashboard */
+export interface ServerAgentProgress {
+  type: 'server_agent_progress';
+  conversationId: string;
+  step: number;
+  maxSteps: number;
+  thinking: string;
+  action?: string;
+  layer?: CommandLayer;
+}
+
+/** Agent connection status from server to dashboard */
+export interface ServerAgentStatus {
+  type: 'server_agent_status';
+  agentConnected: boolean;
+  agentName?: string;
+  supportedLayers?: CommandLayer[];
+}
+
+/** Workflow execution progress from server to dashboard */
+export interface ServerWorkflowProgress {
+  type: 'server_workflow_progress';
+  workflowId: string;
+  step: number;
+  totalSteps: number;
+  currentStepName: string;
+  status: 'running' | 'complete' | 'error';
+  summary?: string;
+}
+
 /** Any message that can be sent over the WebSocket */
-export type WebSocketMessage = AgentCommand | AgentResult | AgentHello;
+export type WebSocketMessage =
+  | AgentCommand | AgentResult | AgentHello
+  | DashboardHello | DashboardChatMessage
+  | DashboardWorkflowRun | DashboardWorkflowCancel
+  | ServerChatResponse | ServerAgentProgress
+  | ServerAgentStatus | ServerWorkflowProgress;
 
 // ---------------------------------------------------------------------------
 // Shell executor result (used internally by the Local Agent)

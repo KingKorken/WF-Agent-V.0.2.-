@@ -1,10 +1,20 @@
 {
   "name": "@workflow-agent/server",
   "version": "0.1.0",
-  "description": "Cloud backend — API, reasoning engine, command router, and platform services",
+  "description": "Bridge server — relays messages between dashboard and local agent, hosts agent loop",
   "private": true,
   "scripts": {
-    "build": "tsc",
-    "dev": "echo 'Server not yet implemented — see implementation briefs'"
+    "build": "npm run build --workspace=@workflow-agent/shared && tsc",
+    "dev": "npm run build --workspace=@workflow-agent/shared && tsc && node dist/bridge.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@workflow-agent/shared": "*",
+    "dotenv": "^16.4.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.0"
   }
 }
