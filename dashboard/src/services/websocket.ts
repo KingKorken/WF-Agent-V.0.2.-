@@ -9,7 +9,9 @@ class WebSocketService {
   private handlers: Set<MessageHandler> = new Set();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private maxReconnectDelay = 30000;
-  private maxReconnectAttempts = 5;
+  // Allow more reconnect attempts locally (services may start at different times)
+  // On Vercel/deployed, we'll detect "never connected" and show appropriate status
+  private maxReconnectAttempts = 15;
 
   constructor(url: string) {
     this.url = url;

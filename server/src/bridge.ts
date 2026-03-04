@@ -721,6 +721,20 @@ async function main(): Promise<void> {
   });
 }
 
+// Global error handlers — prevent crashes from orphaned connections
+process.on('uncaughtException', (err: Error) => {
+  // EIO / EPIPE errors are non-fatal (broken pipe when client disconnects)
+  if (err.message && (err.message.includes('EIO') || err.message.includes('EPIPE'))) {
+    return;
+  }
+  log(`Uncaught exception: ${err.message}`);
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  log(`Unhandled rejection: ${msg}`);
+});
+
 main().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);

@@ -17,6 +17,45 @@ import { createTray, updateConnectionStatus } from './ui/tray';
 import { APP_NAME, DEFAULT_WS_URL } from '@workflow-agent/shared';
 import { log } from './utils/logger';
 
+// ---------------------------------------------------------------------------
+// Global error handlers — prevent async EIO crashes from killing the process
+// ---------------------------------------------------------------------------
+
+process.on('uncaughtException', (err: Error) => {
+  // "write EIO" happens when Electron's stdout/stderr stream breaks
+  // (terminal closes, pipe breaks, etc.). Silently swallow these.
+  if (err.message && err.message.includes('EIO')) {
+    return; // non-fatal — swallow and continue
+  }
+  // Log other uncaught exceptions but don't crash
+  try {
+    console.error(`[uncaughtException] ${err.message}\n${err.stack}`);
+  } catch {
+    // If even stderr is broken, just swallow
+  }
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  try {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    console.error(`[unhandledRejection] ${msg}`);
+  } catch {
+    // swallow
+  }
+});
+
+// Prevent broken pipe crashes when stdout/stderr streams break
+if (process.stdout && typeof process.stdout.on === 'function') {
+  process.stdout.on('error', (err: Error) => {
+    if (err.message.includes('EIO') || err.message.includes('EPIPE')) return;
+  });
+}
+if (process.stderr && typeof process.stderr.on === 'function') {
+  process.stderr.on('error', (err: Error) => {
+    if (err.message.includes('EIO') || err.message.includes('EPIPE')) return;
+  });
+}
+
 /** Timestamp prefix for log messages */
 function timestamp(): string {
   return new Date().toISOString();
