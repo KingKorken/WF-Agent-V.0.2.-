@@ -9,10 +9,9 @@ interface ChatInputProps {
 
 export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
   const activeId = useChatStore((s) => s.activeConversationId);
-  const getDraft = useChatStore((s) => s.getDraft);
+  // Subscribe to the draft value reactively (not via getDraft which uses get() and doesn't trigger re-renders)
+  const inputValue = useChatStore((s) => s.drafts[s.activeConversationId] ?? '');
   const setDraft = useChatStore((s) => s.setDraft);
-
-  const inputValue = getDraft(activeId);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setDraft(activeId, e.target.value);
@@ -33,7 +32,15 @@ export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
 
   return (
     <div className={styles.wrapper}>
-      <button className={styles.plusButton} type="button" aria-label="Add attachment">
+      <button
+        className={styles.plusButton}
+        type="button"
+        aria-label="Add attachment"
+        title="File attachments coming soon"
+        onClick={() => {
+          // File attachment feature — coming in a future release
+        }}
+      >
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M4.16667 10H15.8333" stroke="#4A5565" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.67" />
           <path d="M10 4.16667V15.8333" stroke="#4A5565" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.67" />
