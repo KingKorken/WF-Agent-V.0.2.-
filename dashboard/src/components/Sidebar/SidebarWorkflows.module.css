@@ -55,24 +55,48 @@
   line-height: 1.4;
 }
 
-.runButton {
-  background: var(--color-text);
-  color: var(--color-background);
+/* Start row — right-aligned button */
+.startRow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Start button — identical styling to "Start Recording" button */
+.startButton {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  background: var(--color-button-bg);
   border: none;
   border-radius: var(--radius-button);
-  padding: 4px 16px;
+  padding: 6px 12px;
   font-family: var(--font-family);
-  font-size: var(--font-size-small);
-  font-weight: var(--font-weight-normal);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
   cursor: pointer;
-  transition: opacity var(--duration-instant) var(--ease-out-quad);
+  letter-spacing: -0.3px;
+  transition: background var(--duration-instant) var(--ease-out-quad);
 }
 
-.runButton:hover:not(:disabled) {
-  opacity: 0.8;
+.startButton:hover:not(:disabled) {
+  background: #CDCDCD;
 }
 
-.runButton:disabled {
-  opacity: 0.3;
+.startButton:disabled {
+  opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Orange circle indicator — same as recordIndicator */
+.startIndicator {
+  position: relative;
+  width: 23px;
+  height: 23px;
+  flex-shrink: 0;
+}
+
+.startRing {
+  width: 23px;
+  height: 23px;
 }

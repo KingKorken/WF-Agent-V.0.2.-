@@ -1,10 +1,8 @@
 import { useWorkflowStore } from '../../stores/workflowStore';
-import { useConnectionStore } from '../../stores/connectionStore';
 import styles from './SidebarWorkflows.module.css';
 
 export function SidebarWorkflows() {
   const { workflows, queue, expandedWorkflowId, setExpandedWorkflow, runWorkflow } = useWorkflowStore();
-  const agentConnected = useConnectionStore((s) => s.agentConnected);
 
   // Get starred workflows (active ones)
   const starredWorkflows = workflows.filter((w) => w.status === 'active').slice(0, 3);
@@ -28,17 +26,33 @@ export function SidebarWorkflows() {
             {isExpanded && (
               <div className={styles.workflowActions}>
                 <p className={styles.workflowDescription}>{w.description}</p>
-                <button
-                  type="button"
-                  className={styles.runButton}
-                  disabled={!agentConnected || isQueued}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    runWorkflow(w.id);
-                  }}
-                >
-                  {isQueued ? 'Running...' : 'Run'}
-                </button>
+                <div className={styles.startRow}>
+                  <button
+                    type="button"
+                    className={styles.startButton}
+                    disabled={isQueued}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      runWorkflow(w.id);
+                    }}
+                  >
+                    {isQueued ? 'Running...' : 'Start'}
+                    <span className={styles.startIndicator}>
+                      <svg className={styles.startRing} viewBox="0 0 23 23" fill="none">
+                        <circle cx="11.5" cy="11.5" r="10.5" stroke="#EC8D00" strokeWidth="2" />
+                      </svg>
+                      <svg
+                        style={{ position: 'absolute', top: 5, left: 5 }}
+                        width="13"
+                        height="13"
+                        viewBox="0 0 13 13"
+                        fill="none"
+                      >
+                        <circle cx="6.5" cy="6.5" r="6.5" fill="#EC8D00" />
+                      </svg>
+                    </span>
+                  </button>
+                </div>
               </div>
             )}
           </div>

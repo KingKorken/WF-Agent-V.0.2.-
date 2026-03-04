@@ -13,6 +13,7 @@
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
+import Anthropic from '@anthropic-ai/sdk';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import {
@@ -117,6 +118,68 @@ let agentInfo: { name: string; version: string; platform: string; layers: string
 
 /** Pending command responses (same pattern as test-server) */
 const pendingCommands: Map<string, (result: AgentResult) => void> = new Map();
+
+// ---------------------------------------------------------------------------
+// Simple Claude Chat (NOT the vision agent loop — just text conversation)
+// ---------------------------------------------------------------------------
+
+let anthropicClient: Anthropic | null = null;
+
+/** Per-conversation chat history for simple text chat with Claude */
+const chatHistories: Map<string, Array<{ role: 'user' | 'assistant'; content: string }>> = new Map();
+
+const CHAT_SYSTEM_PROMPT = `You are a helpful AI assistant embedded in a workflow automation dashboard. You help users with:
+- Understanding and managing their automated workflows (HR, accounting, procurement, etc.)
+- Answering questions about workflow status, scheduling, and configuration
+- General questions and conversation
+
+Keep your responses concise and helpful. You do NOT have access to the user's screen or computer — you are a text-based assistant only. If the user asks you to perform a desktop action, explain that they need to use a workflow or direct command (prefixed with /shell, /browser, etc.) for that.`;
+
+function getAnthropicClient(): Anthropic | null {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  if (!anthropicClient) {
+    anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return anthropicClient;
+}
+
+/** Simple text chat with Claude — no vision, no screenshots, no agent loop */
+async function simpleChatWithClaude(conversationId: string, userMessage: string): Promise<string> {
+  const client = getAnthropicClient();
+  if (!client) throw new Error('ANTHROPIC_API_KEY not configured');
+
+  // Get or create conversation history
+  if (!chatHistories.has(conversationId)) {
+    chatHistories.set(conversationId, []);
+  }
+  const history = chatHistories.get(conversationId)!;
+
+  // Add user message
+  history.push({ role: 'user', content: userMessage });
+
+  // Keep last 20 messages to avoid token bloat
+  if (history.length > 20) {
+    history.splice(0, history.length - 20);
+  }
+
+  const response = await client.messages.create({
+    model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: CHAT_SYSTEM_PROMPT,
+    messages: history,
+  });
+
+  // Extract text response
+  const assistantText = response.content
+    .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
+
+  // Add to history
+  history.push({ role: 'assistant', content: assistantText });
+
+  return assistantText;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -303,23 +366,22 @@ function parseDirectCommand(content: string): AgentCommand | null {
 async function handleChatMessage(msg: DashboardChatMessage): Promise<void> {
   const { id, conversationId, content, isDirect } = msg;
 
-  // Check if agent is connected
-  if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
-    sendToDashboard({
-      type: 'server_chat_response',
-      conversationId,
-      message: {
-        id: `resp_${id}`,
-        role: 'system',
-        type: 'error',
-        content: 'Agent is not connected. Start the local agent and try again.',
-      },
-    });
-    return;
-  }
-
-  // Direct command mode
+  // Direct command mode (/shell, /browser, /ax, /vision) — requires agent connection
   if (isDirect) {
+    if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+      sendToDashboard({
+        type: 'server_chat_response',
+        conversationId,
+        message: {
+          id: `resp_${id}`,
+          role: 'system',
+          type: 'error',
+          content: 'Agent is not connected. Start the local agent and try again.',
+        },
+      });
+      return;
+    }
+
     const command = parseDirectCommand(content);
     if (!command) {
       sendToDashboard({
@@ -364,21 +426,8 @@ async function handleChatMessage(msg: DashboardChatMessage): Promise<void> {
     return;
   }
 
-  // Natural language mode — run agent loop
-  if (!agentModulesLoaded) {
-    sendToDashboard({
-      type: 'server_chat_response',
-      conversationId,
-      message: {
-        id: `resp_${id}`,
-        role: 'system',
-        type: 'error',
-        content: 'Agent loop modules not loaded. Build local-agent first: cd local-agent && npm run build',
-      },
-    });
-    return;
-  }
-
+  // Normal chat — simple text conversation with Claude (NO vision, NO screenshots)
+  // This is cheap (~500-2000 tokens per exchange, NOT 15K+ per agent loop step)
   if (!process.env.ANTHROPIC_API_KEY) {
     sendToDashboard({
       type: 'server_chat_response',
@@ -393,88 +442,18 @@ async function handleChatMessage(msg: DashboardChatMessage): Promise<void> {
     return;
   }
 
-  if (agentLoopActive) {
+  log(`Chat message: "${content.substring(0, 80)}"`);
+
+  try {
+    const reply = await simpleChatWithClaude(conversationId, content);
     sendToDashboard({
       type: 'server_chat_response',
       conversationId,
       message: {
         id: `resp_${id}`,
-        role: 'system',
-        type: 'text',
-        content: 'An agent task is already running. Wait for it to complete or cancel it first.',
-      },
-    });
-    return;
-  }
-
-  agentLoopActive = true;
-  log(`Starting agent loop for: "${content.substring(0, 80)}"`);
-
-  try {
-    const result = await runAgentLoop!({
-      goal: content,
-      sendAndWait: sendCommandAndWait,
-      callbacks: {
-        onStep: (step: number, maxIterations: number) => {
-          sendToDashboard({
-            type: 'server_agent_progress',
-            conversationId,
-            step,
-            maxSteps: maxIterations,
-            thinking: `Step ${step}/${maxIterations}...`,
-          });
-        },
-        onThinking: () => {
-          sendToDashboard({
-            type: 'server_agent_progress',
-            conversationId,
-            step: 0,
-            maxSteps: 0,
-            thinking: 'Thinking...',
-          });
-        },
-        onAction: (command: AgentCommand, thinking: string) => {
-          sendToDashboard({
-            type: 'server_agent_progress',
-            conversationId,
-            step: 0,
-            maxSteps: 0,
-            thinking: thinking.substring(0, 200),
-            action: `${command.layer}/${command.action}`,
-            layer: command.layer,
-          });
-        },
-        onComplete: (summary: string) => {
-          log(`Agent loop complete: ${summary.substring(0, 100)}`);
-        },
-        onNeedsHelp: (question: string) => {
-          sendToDashboard({
-            type: 'server_chat_response',
-            conversationId,
-            message: {
-              id: `resp_${id}_help`,
-              role: 'agent',
-              type: 'text',
-              content: `I need your help: ${question}`,
-            },
-          });
-        },
-        onError: (error: string, context: string) => {
-          log(`Agent loop error (${context}): ${error}`);
-        },
-      },
-    });
-
-    // Send final response
-    const roleType = result.outcome === 'error' ? 'error' as const : 'text' as const;
-    sendToDashboard({
-      type: 'server_chat_response',
-      conversationId,
-      message: {
-        id: `resp_${id}_final`,
         role: 'agent',
-        type: roleType,
-        content: result.summary || `Task ${result.outcome}. Steps taken: ${result.steps}`,
+        type: 'text',
+        content: reply,
       },
     });
   } catch (err) {
@@ -482,14 +461,12 @@ async function handleChatMessage(msg: DashboardChatMessage): Promise<void> {
       type: 'server_chat_response',
       conversationId,
       message: {
-        id: `resp_${id}_error`,
+        id: `resp_${id}`,
         role: 'system',
         type: 'error',
-        content: `Agent loop failed: ${err instanceof Error ? err.message : String(err)}`,
+        content: `Chat error: ${err instanceof Error ? err.message : String(err)}`,
       },
     });
-  } finally {
-    agentLoopActive = false;
   }
 }
 
@@ -547,9 +524,11 @@ async function handleWorkflowRun(msg: DashboardWorkflowRun): Promise<void> {
   const goal = `Execute the workflow "${workflowName}". Follow standard operating procedures for this type of task.`;
 
   try {
+    const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '10', 10);
     const result = await runAgentLoop!({
       goal,
       sendAndWait: sendCommandAndWait,
+      maxIterations: maxIter,
       callbacks: {
         onStep: (step: number, maxIterations: number) => {
           sendToDashboard({
