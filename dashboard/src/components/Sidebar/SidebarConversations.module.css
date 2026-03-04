@@ -1,3 +1,18 @@
+.card {
+  background: var(--color-card-bg);
+  border-radius: var(--radius-card);
+  padding: 16px 20px;
+}
+
+.title {
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
+  letter-spacing: -0.3px;
+  margin-bottom: 12px;
+}
+
 .list {
   display: flex;
   flex-direction: column;
@@ -7,26 +22,29 @@
 .item {
   background: none;
   border: none;
-  padding: var(--space-xs) var(--space-sm);
+  padding: 6px 0;
   font-family: var(--font-family);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-regular);
-  color: var(--color-text-secondary);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
   cursor: pointer;
   text-align: left;
   border-radius: var(--radius);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: background var(--duration-instant) var(--ease-out-quad);
+  letter-spacing: -0.3px;
+  transition: opacity var(--duration-instant) var(--ease-out-quad);
 }
 
 .item:hover {
-  background: rgba(0, 0, 0, 0.04);
+  opacity: 0.7;
 }
 
 .item[data-active] {
-  background: rgba(0, 0, 0, 0.06);
-  font-weight: var(--font-weight-medium);
-  color: var(--color-text);
+  background: rgba(240, 237, 237, 0.7);
+  border-radius: var(--radius-button);
+  padding: 6px 8px;
+  margin: 0 -8px;
+  font-weight: var(--font-weight-regular);
 }

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { TabBar } from './components/TabBar/TabBar';
 import { QueuePanel } from './components/QueuePanel/QueuePanel';
@@ -19,12 +19,13 @@ export function App() {
   const openTab = useTabStore((s) => s.openTab);
   const queue = useWorkflowStore((s) => s.queue);
   const hasQueue = queue.length >= 2;
+  const [sidebarVisible, setSidebarVisible] = useState(true);
 
   useKeyboardShortcuts();
 
   // Restore tab from URL hash on mount
   useEffect(() => {
-    const hash = window.location.hash.slice(1); // e.g. "#logbook"
+    const hash = window.location.hash.slice(1);
     if (hash && hash !== 'workspace') {
       openTab({
         id: hash,
@@ -46,25 +47,71 @@ export function App() {
   }, []);
 
   return (
-    <div className={styles.root} data-has-queue={hasQueue}>
-      <Sidebar />
-      {hasQueue && <QueuePanel />}
-      <div className={styles.canvasWrapper}>
-        <ConnectionBanner />
-        <TabBar />
-        <div className={styles.canvas}>
-          {activeTabId === 'workspace' && <ChatView />}
-          {activeTabId === 'logbook' && <LogbookView />}
-          {activeTabId === 'record' && <RecordView />}
-          {activeTabId === 'settings' && <SettingsView />}
-          {activeTabId === 'email' && (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--color-text-secondary)', opacity: 0.6 }}>Email integration coming soon.</p>
-            </div>
-          )}
+    <>
+      {/* Top navigation bar spanning full width */}
+      <div className={styles.navBar}>
+        <div className={styles.navControls}>
+          {/* Sidebar collapse toggle */}
+          <button
+            className={styles.navButton}
+            onClick={() => setSidebarVisible(!sidebarVisible)}
+            aria-label={sidebarVisible ? 'Collapse sidebar' : 'Expand sidebar'}
+          >
+            <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+              <rect x="0.5" y="0.5" width="15" height="11" rx="1.5" stroke="black" />
+              <line x1="5.21" x2="5.21" y1="12" y2="0" stroke="black" />
+            </svg>
+          </button>
+          {/* Back */}
+          <button
+            className={styles.navButton}
+            onClick={() => window.history.back()}
+            aria-label="Go back"
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M12.5 15L7.5 10L12.5 5" stroke="black" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.67" strokeOpacity="0.9" />
+            </svg>
+          </button>
+          {/* Forward */}
+          <button
+            className={styles.navButton}
+            onClick={() => window.history.forward()}
+            aria-label="Go forward"
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M7.5 15L12.5 10L7.5 5" stroke="#838383" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.67" strokeOpacity="0.9" />
+            </svg>
+          </button>
+        </div>
+        <div className={styles.navTabArea}>
+          <TabBar />
         </div>
       </div>
-      <OnboardingOverlay />
-    </div>
+
+      {/* Main content area */}
+      <div
+        className={styles.root}
+        data-has-queue={hasQueue}
+        data-sidebar-hidden={!sidebarVisible || undefined}
+      >
+        {sidebarVisible && <Sidebar />}
+        {hasQueue && <QueuePanel />}
+        <div className={styles.canvasWrapper}>
+          <ConnectionBanner />
+          <div className={styles.canvas}>
+            {activeTabId === 'workspace' && <ChatView />}
+            {activeTabId === 'logbook' && <LogbookView />}
+            {activeTabId === 'record' && <RecordView />}
+            {activeTabId === 'settings' && <SettingsView />}
+            {activeTabId === 'email' && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: 'var(--color-bg)' }}>
+                <p style={{ color: 'var(--color-text-secondary)', opacity: 0.6 }}>Email integration coming soon.</p>
+              </div>
+            )}
+          </div>
+        </div>
+        <OnboardingOverlay />
+      </div>
+    </>
   );
 }

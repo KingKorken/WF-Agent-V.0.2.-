@@ -10,7 +10,7 @@ export function TabBar() {
 
   return (
     <div className={styles.tabBar} role="tablist" aria-label="View tabs">
-      <div className={styles.tabs}>
+      <div className={styles.tabContainer}>
         {tabs.map((tab) => (
           <Tab
             key={tab.id}
@@ -23,7 +23,6 @@ export function TabBar() {
           />
         ))}
       </div>
-      <div className={styles.line} />
     </div>
   );
 }

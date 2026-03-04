@@ -1,8 +1,8 @@
 .dock {
   display: flex;
-  gap: var(--space-lg);
+  gap: var(--space-sm);
   justify-content: center;
-  padding: var(--space-sm) 0;
+  padding: var(--space-sm) 12px;
   flex-shrink: 0;
 }
 

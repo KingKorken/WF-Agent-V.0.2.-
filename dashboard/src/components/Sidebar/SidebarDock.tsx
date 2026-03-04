@@ -1,8 +1,9 @@
 import { DockIcon } from './DockIcon';
 import { useTabStore } from '../../stores/tabStore';
+import { CalendarIcon } from './icons/CalendarIcon';
 import { LogbookIcon } from './icons/LogbookIcon';
-import { RecordIcon } from './icons/RecordIcon';
 import { EmailIcon } from './icons/EmailIcon';
+import { WorkflowLibraryIcon } from './icons/WorkflowLibraryIcon';
 import styles from './SidebarDock.module.css';
 
 export function SidebarDock() {
@@ -11,19 +12,28 @@ export function SidebarDock() {
   return (
     <div className={styles.dock}>
       <DockIcon
-        icon={<LogbookIcon />}
-        label="Logbook"
-        onClick={() => openTab({ id: 'logbook', label: 'Logbook', closable: true })}
+        icon={<CalendarIcon />}
+        label="Calendar"
+        background="linear-gradient(to bottom, #fdfefe, #ecebeb)"
+        onClick={() => openTab({ id: 'record', label: 'Record', closable: true })}
       />
       <DockIcon
-        icon={<RecordIcon />}
-        label="Record"
-        onClick={() => openTab({ id: 'record', label: 'Record', closable: true })}
+        icon={<LogbookIcon />}
+        label="Logbook"
+        background="linear-gradient(to bottom, #ff8f00, #ff5a00)"
+        onClick={() => openTab({ id: 'logbook', label: 'Logbook', closable: true })}
       />
       <DockIcon
         icon={<EmailIcon />}
         label="Email"
+        background="linear-gradient(to bottom, #11c0fb, #0071ff)"
         onClick={() => openTab({ id: 'email', label: 'Email', closable: true })}
+      />
+      <DockIcon
+        icon={<WorkflowLibraryIcon />}
+        label="Workflow Library"
+        background="linear-gradient(to bottom, #ffffff, #ecebeb)"
+        onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
       />
     </div>
   );

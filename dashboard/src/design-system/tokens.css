@@ -1,11 +1,26 @@
 :root {
-  /* Colors — exactly 3 + error */
-  --color-bg: #E0E0E0;
+  /* Colors — Figma V1 palette */
+  --color-bg: #EEEEEE;
   --color-text: #0A0A0A;
   --color-text-secondary: #1A1A1A;
-  --color-accent: #C55A2B;
+  --color-text-muted: #99A1AF;
+  --color-accent: #EC8D00;
+  --color-accent-dark: #C55A2B;
   --color-error: #D32F2F;
   --color-divider: rgba(0, 0, 0, 0.12);
+
+  /* Sidebar */
+  --color-sidebar-bg: #7B7B7B;
+  --color-sidebar-text: #ffffff;
+  --color-sidebar-text-secondary: rgba(255, 255, 255, 0.7);
+
+  /* Surfaces */
+  --color-card-bg: #ffffff;
+  --color-nav-bg: #FAF9F5;
+  --color-profile-bg: #FAF9F6;
+  --color-tab-container: #D9D9D9;
+  --color-tab-bg: #FDFBFB;
+  --color-button-bg: #D9D9D9;
 
   /* Spacing — 8px base, all multiples of 8 */
   --space-xs: 8px;
@@ -16,13 +31,14 @@
 
   /* Typography */
   --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-weight-light: 300;
   --font-weight-regular: 400;
   --font-weight-medium: 500;
   --font-weight-bold: 700;
-  --font-size-xs: 11px;
+  --font-size-xs: 10px;
   --font-size-sm: 13px;
-  --font-size-base: 15px;
-  --font-size-lg: 18px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
   --font-size-xl: 24px;
   --font-size-xxl: 32px;
   --line-height-tight: 1.2;
@@ -30,14 +46,18 @@
   --line-height-relaxed: 1.7;
 
   /* Layout */
-  --sidebar-width: 280px;
-  --sidebar-min-width: 220px;
-  --sidebar-max-width: 480px;
+  --sidebar-width: 420px;
+  --sidebar-min-width: 320px;
+  --sidebar-max-width: 560px;
   --queue-panel-width: 200px;
-  --tab-bar-height: 40px;
+  --tab-bar-height: 36px;
 
   /* Border */
   --radius: 4px;
+  --radius-card: 16px;
+  --radius-button: 7px;
+  --radius-input: 15px;
+  --radius-dock-icon: 18px;
 
   /* Motion */
   --ease-out-quad: cubic-bezier(0.25, 0.46, 0.45, 0.94);
@@ -45,8 +65,9 @@
   --duration-fast: 150ms;
   --duration-normal: 250ms;
 
-  /* Dock hover */
+  /* Dock */
+  --dock-icon-size: 65px;
   --dock-hover-scale: 1.06;
-  --dock-hover-glow: 0 0 12px rgba(197, 90, 43, 0.4);
+  --dock-hover-glow: 0 0 12px rgba(236, 141, 0, 0.4);
   --dock-neighbor-dim: 0.6;
 }

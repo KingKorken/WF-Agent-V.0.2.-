@@ -1,16 +1,19 @@
 .tabBar {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 0;
 }
 
-.tabs {
+.tabContainer {
   display: flex;
-  gap: var(--space-lg);
-  padding: var(--space-xs) var(--space-sm) 0;
-  align-items: baseline;
+  gap: 2px;
+  background: var(--color-tab-container);
+  border-radius: 4.5px;
+  padding: 3px;
 }
 
 .line {
-  height: 1px;
-  background: var(--color-divider);
-  margin-top: var(--space-xs);
+  display: none;
 }

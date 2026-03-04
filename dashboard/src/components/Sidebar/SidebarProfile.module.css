@@ -1,18 +1,45 @@
 .profile {
-  background: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--color-profile-bg);
   border: none;
-  padding: var(--space-xs) var(--space-sm);
+  padding: 11px 12px;
   font-family: var(--font-family);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-regular);
-  color: var(--color-text-secondary);
   cursor: pointer;
   text-align: left;
-  border-radius: var(--radius);
   flex-shrink: 0;
   transition: background var(--duration-instant) var(--ease-out-quad);
+  height: 56px;
 }
 
 .profile:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: #f0efe9;
+}
+
+.avatar {
+  flex-shrink: 0;
+  width: 33px;
+  height: 33px;
+}
+
+.info {
+  display: flex;
+  flex-direction: column;
+}
+
+.name {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
+  letter-spacing: -0.3px;
+  line-height: 1.1;
+}
+
+.role {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
+  letter-spacing: -0.3px;
+  line-height: 1.2;
 }

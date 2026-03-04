@@ -12,6 +12,9 @@ export default defineConfig({
   server: {
     port: 5173,
   },
+  optimizeDeps: {
+    exclude: ['canvg', 'html2canvas', 'dompurify'],
+  },
   build: {
     rollupOptions: {
       // jsPDF optional dependencies — not needed for text-only PDF generation

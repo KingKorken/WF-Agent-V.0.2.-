@@ -1,9 +1,9 @@
 .tab {
-  background: none;
+  background: transparent;
   border: none;
-  padding: 0;
+  padding: 2px 12px;
   font-family: var(--font-family);
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-sm);
   font-weight: var(--font-weight-regular);
   color: var(--color-text);
   cursor: pointer;
@@ -12,10 +12,18 @@
   gap: 6px;
   position: relative;
   white-space: nowrap;
+  border-radius: 4.5px;
+  height: 20px;
+  transition: background var(--duration-instant) var(--ease-out-quad);
+}
+
+.tab:hover {
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .tab.active {
-  font-weight: var(--font-weight-bold);
+  background: var(--color-tab-bg);
+  font-weight: var(--font-weight-medium);
 }
 
 .close {

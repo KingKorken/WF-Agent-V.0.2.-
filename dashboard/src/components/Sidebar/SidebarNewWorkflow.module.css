@@ -1,17 +1,49 @@
-.button {
-  background: none;
-  border: none;
-  padding: var(--space-xs) var(--space-sm);
+.wrapper {
+  background: var(--color-card-bg);
+  border-radius: var(--radius-card);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.label {
   font-family: var(--font-family);
   font-size: var(--font-size-base);
-  font-weight: var(--font-weight-medium);
-  color: var(--color-accent);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
+  letter-spacing: -0.3px;
+}
+
+.button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  background: var(--color-button-bg);
+  border: none;
+  border-radius: var(--radius-button);
+  padding: 6px 12px;
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
   cursor: pointer;
-  text-align: left;
-  border-radius: var(--radius);
+  letter-spacing: -0.3px;
   transition: background var(--duration-instant) var(--ease-out-quad);
 }
 
 .button:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: #CDCDCD;
+}
+
+.recordIndicator {
+  position: relative;
+  width: 23px;
+  height: 23px;
+  flex-shrink: 0;
+}
+
+.recordRing {
+  width: 23px;
+  height: 23px;
 }

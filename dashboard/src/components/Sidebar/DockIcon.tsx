@@ -1,12 +1,13 @@
 import styles from './DockIcon.module.css';
 
 interface DockIconProps {
-  icon: React.ReactNode; // SVG element
+  icon: React.ReactNode;
   label: string;
   onClick: () => void;
+  background?: string;
 }
 
-export function DockIcon({ icon, label, onClick }: DockIconProps) {
+export function DockIcon({ icon, label, onClick, background }: DockIconProps) {
   return (
     <button
       className={styles.icon}
@@ -14,6 +15,7 @@ export function DockIcon({ icon, label, onClick }: DockIconProps) {
       title={label}
       aria-label={label}
       data-dock-icon
+      style={background ? { background } : undefined}
     >
       {icon}
     </button>

@@ -1,38 +1,77 @@
+/* Starred Workflows widget card */
+.starredCard {
+  background: var(--color-card-bg);
+  border-radius: var(--radius-card);
+  padding: 16px 20px;
+}
+
+.starredTitle {
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
+  letter-spacing: -0.3px;
+  margin-bottom: 12px;
+}
+
+.starredItem {
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
+  letter-spacing: -0.3px;
+  padding: 6px 0;
+  cursor: pointer;
+  transition: opacity var(--duration-instant) var(--ease-out-quad);
+}
+
+.starredItem:hover {
+  opacity: 0.7;
+}
+
+.starredItemHighlight {
+  background: rgba(240, 237, 237, 0.7);
+  border-radius: var(--radius-button);
+  padding: 6px 8px;
+  margin: 0 -8px;
+}
+
+/* Expandable all-workflows section */
 .toggle {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
   background: none;
   border: none;
-  padding: var(--space-xs) var(--space-sm);
+  padding: var(--space-xs) 0;
   font-family: var(--font-family);
   font-size: var(--font-size-base);
-  font-weight: var(--font-weight-regular);
-  color: var(--color-text);
+  font-weight: var(--font-weight-light);
+  color: var(--color-sidebar-text);
   cursor: pointer;
   text-align: left;
-  border-radius: var(--radius);
   width: 100%;
-  transition: background var(--duration-instant) var(--ease-out-quad);
+  letter-spacing: -0.3px;
+  transition: opacity var(--duration-instant) var(--ease-out-quad);
 }
 
 .toggle:hover {
-  background: rgba(0, 0, 0, 0.04);
+  opacity: 0.8;
 }
 
 .arrow {
   font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
+  color: var(--color-sidebar-text-secondary);
   width: 12px;
   text-align: center;
 }
 
 .content {
-  padding: var(--space-xs) var(--space-sm) var(--space-xs) calc(var(--space-sm) + 20px);
+  padding: 0 0 0 20px;
 }
 
 .department {
-  margin-bottom: var(--space-xs);
+  margin-bottom: 2px;
 }
 
 .departmentToggle {
@@ -45,7 +84,7 @@
   font-family: var(--font-family);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
-  color: var(--color-text);
+  color: var(--color-sidebar-text);
   cursor: pointer;
   width: 100%;
   text-align: left;
@@ -59,12 +98,12 @@
   margin-top: 4px;
 }
 
-.card {
+.workflowCard {
   border-radius: var(--radius);
   overflow: hidden;
 }
 
-.cardHeader {
+.workflowCardHeader {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
@@ -73,7 +112,7 @@
   padding: 6px var(--space-xs);
   font-family: var(--font-family);
   font-size: var(--font-size-sm);
-  color: var(--color-text);
+  color: var(--color-sidebar-text);
   cursor: pointer;
   width: 100%;
   text-align: left;
@@ -81,8 +120,8 @@
   transition: background var(--duration-instant) var(--ease-out-quad);
 }
 
-.cardHeader:hover {
-  background: rgba(0, 0, 0, 0.04);
+.workflowCardHeader:hover {
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .statusDot {
@@ -93,7 +132,7 @@
 }
 
 .statusDot[data-status="active"] {
-  background: var(--color-text);
+  background: var(--color-sidebar-text);
 }
 
 .statusDot[data-status="failed-last-run"] {
@@ -101,7 +140,7 @@
 }
 
 .statusDot[data-status="never-run"] {
-  background: var(--color-text);
+  background: var(--color-sidebar-text);
   opacity: 0.3;
 }
 
@@ -117,13 +156,13 @@
 
 .description {
   font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
+  color: var(--color-sidebar-text-secondary);
   margin-bottom: var(--space-xs);
 }
 
 .lastRun {
   font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
+  color: var(--color-sidebar-text-secondary);
   opacity: 0.6;
   margin-bottom: var(--space-xs);
 }
@@ -141,7 +180,7 @@
 
 .empty {
   font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
+  color: var(--color-sidebar-text-secondary);
   opacity: 0.6;
   line-height: var(--line-height-relaxed);
 }

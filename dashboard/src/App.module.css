@@ -1,7 +1,49 @@
+.navBar {
+  display: flex;
+  align-items: center;
+  background: var(--color-nav-bg);
+  border-bottom: 0.2px solid var(--color-text);
+  height: var(--tab-bar-height);
+  padding: 0 var(--space-sm);
+  gap: var(--space-sm);
+  flex-shrink: 0;
+}
+
+.navControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.navButton {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  opacity: 0.8;
+  transition: opacity var(--duration-instant) var(--ease-out-quad);
+}
+
+.navButton:hover {
+  opacity: 1;
+}
+
+.navTabArea {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
 .root {
   display: grid;
   grid-template-columns: var(--sidebar-width) 1fr;
-  height: 100vh;
+  height: calc(100vh - var(--tab-bar-height));
   overflow: hidden;
 }
 
@@ -9,10 +51,17 @@
   grid-template-columns: var(--sidebar-width) var(--queue-panel-width) 1fr;
 }
 
+.root[data-sidebar-hidden] {
+  grid-template-columns: 1fr;
+}
+
+.root[data-sidebar-hidden][data-has-queue="true"] {
+  grid-template-columns: var(--queue-panel-width) 1fr;
+}
+
 .canvasWrapper {
   display: flex;
   flex-direction: column;
-  height: 100vh;
   overflow: hidden;
 }
 
