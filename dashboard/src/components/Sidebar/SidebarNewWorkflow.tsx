@@ -1,10 +1,16 @@
+import { useTabStore } from '../../stores/tabStore';
 import styles from './SidebarNewWorkflow.module.css';
 
 export function SidebarNewWorkflow() {
+  const openTab = useTabStore((s) => s.openTab);
+
   return (
     <div className={styles.wrapper}>
       <span className={styles.label}>Record a new Workflow</span>
-      <button className={styles.button}>
+      <button
+        className={styles.button}
+        onClick={() => openTab({ id: 'record', label: 'Record', closable: true })}
+      >
         Start Recording
         <span className={styles.recordIndicator}>
           <svg className={styles.recordRing} viewBox="0 0 23 23" fill="none">

@@ -15,7 +15,7 @@ export function SidebarDock() {
         icon={<CalendarIcon />}
         label="Calendar"
         background="linear-gradient(to bottom, #fdfefe, #ecebeb)"
-        onClick={() => openTab({ id: 'record', label: 'Record', closable: true })}
+        onClick={() => openTab({ id: 'calendar', label: 'Calendar', closable: true })}
       />
       <DockIcon
         icon={<LogbookIcon />}
