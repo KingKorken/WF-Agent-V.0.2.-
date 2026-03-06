@@ -33,7 +33,7 @@ export function SidebarDock() {
         icon={<WorkflowLibraryIcon />}
         label="Workflow Library"
         background="linear-gradient(to bottom, #ffffff, #ecebeb)"
-        onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
+        onClick={() => openTab({ id: 'workflow-library', label: 'Workflow Library', closable: true })}
       />
     </div>
   );

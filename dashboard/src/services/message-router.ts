@@ -13,6 +13,11 @@ import type {
   ServerAgentProgress,
   ServerAgentStatus,
   ServerWorkflowProgress,
+  AgentWorkflowParsed,
+  AgentRecordingError,
+  AgentWorkflowList,
+  AgentWorkflowDetail,
+  AgentWorkflowDeleted,
 } from '@shared/types';
 import { wsService } from './websocket';
 import { useChatStore } from '../stores/chatStore';
@@ -75,7 +80,59 @@ function handleMessage(message: WebSocketMessage): void {
       break;
     }
 
-    // Ignore messages not meant for the dashboard (agent protocol messages)
+    // --- Recording lifecycle ---
+
+    case 'agent_recording_started': {
+      useWorkflowStore.getState().setRecordingState('recording');
+      break;
+    }
+
+    case 'agent_recording_stopped': {
+      // Intermediate state — wait for parsing notification
+      break;
+    }
+
+    case 'agent_recording_parsing': {
+      useWorkflowStore.getState().setRecordingState('parsing');
+      break;
+    }
+
+    case 'agent_workflow_parsed': {
+      const msg = message as AgentWorkflowParsed;
+      const store = useWorkflowStore.getState();
+      store.setRecordingState('complete');
+      store.addParsedWorkflow(msg.workflow);
+      break;
+    }
+
+    case 'agent_recording_error': {
+      const msg = message as AgentRecordingError;
+      const store = useWorkflowStore.getState();
+      store.setRecordingState('error');
+      store.setRecordingError(msg.error);
+      break;
+    }
+
+    // --- Workflow CRUD responses ---
+
+    case 'agent_workflow_list': {
+      const msg = message as AgentWorkflowList;
+      useWorkflowStore.getState().setWorkflows(msg.workflows);
+      break;
+    }
+
+    case 'agent_workflow_detail': {
+      const msg = message as AgentWorkflowDetail;
+      useWorkflowStore.getState().setWorkflowDetail(msg.workflow);
+      break;
+    }
+
+    case 'agent_workflow_deleted': {
+      const msg = message as AgentWorkflowDeleted;
+      useWorkflowStore.getState().removeWorkflow(msg.workflowId);
+      break;
+    }
+
     default:
       break;
   }

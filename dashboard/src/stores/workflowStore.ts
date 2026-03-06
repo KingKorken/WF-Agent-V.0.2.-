@@ -1,17 +1,8 @@
 import { create } from 'zustand';
+import type { WorkflowSummary } from '@shared/types';
 import { wsService } from '../services/websocket';
 
-export type WorkflowStatus = 'active' | 'failed-last-run' | 'never-run';
-
-export interface Workflow {
-  id: string;
-  name: string;
-  department: string;
-  description: string;
-  lastRun: Date | null;
-  lastRunSuccess: boolean | null;
-  status: WorkflowStatus;
-}
+export type RecordingState = 'idle' | 'recording' | 'parsing' | 'complete' | 'error';
 
 export interface QueuedWorkflow {
   workflowId: string;
@@ -22,10 +13,37 @@ export interface QueuedWorkflow {
 }
 
 interface WorkflowState {
-  workflows: Workflow[];
+  // Workflow library
+  workflows: WorkflowSummary[];
+  selectedWorkflow: Record<string, unknown> | null;
+  loading: boolean;
+
+  // Recording
+  recordingState: RecordingState;
+  recordingError: string | null;
+
+  // Execution queue
   queue: QueuedWorkflow[];
   executingWorkflow: QueuedWorkflow | null;
   expandedWorkflowId: string | null;
+
+  // Actions — send WebSocket commands
+  fetchWorkflows: () => void;
+  fetchWorkflowDetail: (id: string) => void;
+  deleteWorkflow: (id: string) => void;
+  startRecording: (description: string) => void;
+  stopRecording: () => void;
+  runWorkflow: (workflowId: string) => void;
+
+  // Handlers — called by message-router
+  setWorkflows: (list: WorkflowSummary[]) => void;
+  setWorkflowDetail: (def: Record<string, unknown>) => void;
+  removeWorkflow: (id: string) => void;
+  setRecordingState: (state: RecordingState) => void;
+  setRecordingError: (error: string | null) => void;
+  addParsedWorkflow: (workflow: WorkflowSummary) => void;
+
+  // Queue actions
   setExpandedWorkflow: (id: string | null) => void;
   queueWorkflow: (workflow: QueuedWorkflow) => void;
   removeFromQueue: (workflowId: string) => void;
@@ -33,23 +51,91 @@ interface WorkflowState {
   startExecution: (workflowId: string) => void;
   completeExecution: (workflowId: string) => void;
   cancelQueued: (workflowId: string) => void;
-  runWorkflow: (workflowId: string) => void;
 }
 
-// Mock data for development — remove when connecting to real API
-const MOCK_WORKFLOWS: Workflow[] = [
-  { id: '1', name: 'Monthly Payroll', department: 'HR', description: 'Process monthly payroll for all employees', lastRun: new Date('2026-02-28'), lastRunSuccess: true, status: 'active' },
-  { id: '2', name: 'Employee Onboarding', department: 'HR', description: 'New employee onboarding checklist and setup', lastRun: new Date('2026-02-15'), lastRunSuccess: true, status: 'active' },
-  { id: '3', name: 'Monthly Closing', department: 'Controlling', description: 'End-of-month financial closing process', lastRun: new Date('2026-02-28'), lastRunSuccess: false, status: 'failed-last-run' },
-  { id: '4', name: 'Invoice Processing', department: 'Controlling', description: 'Process and verify incoming invoices', lastRun: null, lastRunSuccess: null, status: 'never-run' },
-  { id: '5', name: 'Vendor Evaluation', department: 'Procurement', description: 'Quarterly vendor performance evaluation', lastRun: new Date('2026-01-15'), lastRunSuccess: true, status: 'active' },
-];
-
 export const useWorkflowStore = create<WorkflowState>((set) => ({
-  workflows: MOCK_WORKFLOWS,
+  workflows: [],
+  selectedWorkflow: null,
+  loading: false,
+
+  recordingState: 'idle',
+  recordingError: null,
+
   queue: [],
   executingWorkflow: null,
   expandedWorkflowId: null,
+
+  // --- WebSocket command senders ---
+
+  fetchWorkflows: () => {
+    set({ loading: true });
+    wsService.send({ type: 'dashboard_list_workflows' });
+  },
+
+  fetchWorkflowDetail: (id) => {
+    wsService.send({ type: 'dashboard_get_workflow', workflowId: id });
+  },
+
+  deleteWorkflow: (id) => {
+    wsService.send({ type: 'dashboard_delete_workflow', workflowId: id });
+  },
+
+  startRecording: (description) => {
+    set({ recordingState: 'recording', recordingError: null });
+    wsService.send({ type: 'dashboard_start_recording', description });
+  },
+
+  stopRecording: () => {
+    wsService.send({ type: 'dashboard_stop_recording' });
+  },
+
+  runWorkflow: (workflowId) => {
+    const { workflows, queue } = useWorkflowStore.getState();
+    const workflow = workflows.find((w) => w.id === workflowId);
+    if (!workflow) return;
+    if (queue.some((q) => q.workflowId === workflowId)) return;
+
+    const queued: QueuedWorkflow = {
+      workflowId,
+      name: workflow.name,
+      progress: '0/0',
+      currentStep: 'Starting...',
+      position: queue.length,
+    };
+
+    useWorkflowStore.getState().queueWorkflow(queued);
+    wsService.send({
+      type: 'dashboard_workflow_run',
+      workflowId,
+      workflowName: workflow.name,
+    });
+  },
+
+  // --- Handlers called by message-router ---
+
+  setWorkflows: (list) => set({ workflows: list, loading: false }),
+
+  setWorkflowDetail: (def) => set({ selectedWorkflow: def }),
+
+  removeWorkflow: (id) =>
+    set((state) => ({
+      workflows: state.workflows.filter((w) => w.id !== id),
+      selectedWorkflow:
+        state.selectedWorkflow && (state.selectedWorkflow as { id?: string }).id === id
+          ? null
+          : state.selectedWorkflow,
+    })),
+
+  setRecordingState: (recordingState) => set({ recordingState }),
+
+  setRecordingError: (error) => set({ recordingError: error }),
+
+  addParsedWorkflow: (workflow) =>
+    set((state) => ({
+      workflows: [workflow, ...state.workflows],
+    })),
+
+  // --- Queue management (unchanged from before) ---
 
   setExpandedWorkflow: (id) => set({ expandedWorkflowId: id }),
 
@@ -96,11 +182,7 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
   completeExecution: (workflowId) =>
     set((state) => {
       const newQueue = state.queue.filter((q) => q.workflowId !== workflowId);
-      // Promote next in queue to position 0
-      const nextQueue = newQueue.map((q, i) => ({
-        ...q,
-        position: i,
-      }));
+      const nextQueue = newQueue.map((q, i) => ({ ...q, position: i }));
       return {
         queue: nextQueue,
         executingWorkflow: nextQueue.find((q) => q.position === 0) ?? null,
@@ -117,28 +199,4 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
         executingWorkflow: newQueue.find((q) => q.position === 0) ?? null,
       };
     }),
-
-  runWorkflow: (workflowId) => {
-    const { workflows, queue } = useWorkflowStore.getState();
-    const workflow = workflows.find((w) => w.id === workflowId);
-    if (!workflow) return;
-
-    // Don't queue if already queued
-    if (queue.some((q) => q.workflowId === workflowId)) return;
-
-    const queued: QueuedWorkflow = {
-      workflowId,
-      name: workflow.name,
-      progress: '0/0',
-      currentStep: 'Starting...',
-      position: queue.length,
-    };
-
-    useWorkflowStore.getState().queueWorkflow(queued);
-    wsService.send({
-      type: 'dashboard_workflow_run',
-      workflowId,
-      workflowName: workflow.name,
-    });
-  },
 }));

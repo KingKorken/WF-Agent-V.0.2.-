@@ -493,13 +493,112 @@ export interface ServerWorkflowProgress {
   summary?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Dashboard → Server → Local Agent: Recording & Workflow CRUD
+// ---------------------------------------------------------------------------
+
+/** Start a recording session on the local agent */
+export interface DashboardStartRecording {
+  type: 'dashboard_start_recording';
+  description: string;
+}
+
+/** Stop the current recording session on the local agent */
+export interface DashboardStopRecording {
+  type: 'dashboard_stop_recording';
+}
+
+/** Request list of all workflows from the local agent */
+export interface DashboardListWorkflows {
+  type: 'dashboard_list_workflows';
+}
+
+/** Request full details for a specific workflow */
+export interface DashboardGetWorkflow {
+  type: 'dashboard_get_workflow';
+  workflowId: string;
+}
+
+/** Delete a workflow from the local agent */
+export interface DashboardDeleteWorkflow {
+  type: 'dashboard_delete_workflow';
+  workflowId: string;
+}
+
+// ---------------------------------------------------------------------------
+// Local Agent → Server → Dashboard: Recording & Workflow responses
+// ---------------------------------------------------------------------------
+
+/** Recording session started successfully */
+export interface AgentRecordingStarted {
+  type: 'agent_recording_started';
+  sessionId: string;
+}
+
+/** Recording session stopped */
+export interface AgentRecordingStopped {
+  type: 'agent_recording_stopped';
+  sessionId: string;
+}
+
+/** Recording is being parsed into a workflow (show spinner) */
+export interface AgentRecordingParsing {
+  type: 'agent_recording_parsing';
+}
+
+/** Workflow summary — subset of WorkflowDefinition for list views */
+export interface WorkflowSummary {
+  id: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  applicationCount: number;
+  stepCount: number;
+}
+
+/** Workflow parsed successfully from a recording */
+export interface AgentWorkflowParsed {
+  type: 'agent_workflow_parsed';
+  workflow: WorkflowSummary;
+}
+
+/** List of all workflows on the local agent */
+export interface AgentWorkflowList {
+  type: 'agent_workflow_list';
+  workflows: WorkflowSummary[];
+}
+
+/** Full workflow definition (response to get_workflow) */
+export interface AgentWorkflowDetail {
+  type: 'agent_workflow_detail';
+  workflow: Record<string, unknown>;
+}
+
+/** Workflow deleted from local agent */
+export interface AgentWorkflowDeleted {
+  type: 'agent_workflow_deleted';
+  workflowId: string;
+}
+
+/** Recording or workflow operation error */
+export interface AgentRecordingError {
+  type: 'agent_recording_error';
+  error: string;
+}
+
 /** Any message that can be sent over the WebSocket */
 export type WebSocketMessage =
   | AgentCommand | AgentResult | AgentHello
   | DashboardHello | DashboardChatMessage
   | DashboardWorkflowRun | DashboardWorkflowCancel
+  | DashboardStartRecording | DashboardStopRecording
+  | DashboardListWorkflows | DashboardGetWorkflow | DashboardDeleteWorkflow
   | ServerChatResponse | ServerAgentProgress
-  | ServerAgentStatus | ServerWorkflowProgress;
+  | ServerAgentStatus | ServerWorkflowProgress
+  | AgentRecordingStarted | AgentRecordingStopped
+  | AgentRecordingParsing | AgentWorkflowParsed
+  | AgentWorkflowList | AgentWorkflowDetail
+  | AgentWorkflowDeleted | AgentRecordingError;
 
 // ---------------------------------------------------------------------------
 // Shell executor result (used internally by the Local Agent)

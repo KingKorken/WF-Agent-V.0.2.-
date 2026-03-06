@@ -4,8 +4,8 @@ import styles from './SidebarWorkflows.module.css';
 export function SidebarWorkflows() {
   const { workflows, queue, expandedWorkflowId, setExpandedWorkflow, runWorkflow } = useWorkflowStore();
 
-  // Get starred workflows (active ones)
-  const starredWorkflows = workflows.filter((w) => w.status === 'active').slice(0, 3);
+  // Show the first 3 workflows
+  const starredWorkflows = workflows.slice(0, 3);
 
   return (
     <div className={styles.starredCard}>
@@ -21,7 +21,7 @@ export function SidebarWorkflows() {
               className={`${styles.starredItem} ${isExpanded ? styles.starredItemHighlight : ''}`}
               onClick={() => setExpandedWorkflow(isExpanded ? null : w.id)}
             >
-              {w.department} - {w.name}
+              {w.name}
             </button>
             {isExpanded && (
               <div className={styles.workflowActions}>

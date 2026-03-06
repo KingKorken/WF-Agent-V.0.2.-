@@ -670,6 +670,36 @@ async function main(): Promise<void> {
           break;
         }
 
+        // Dashboard → Agent relay (recording & workflow CRUD)
+        case 'dashboard_start_recording':
+        case 'dashboard_stop_recording':
+        case 'dashboard_list_workflows':
+        case 'dashboard_get_workflow':
+        case 'dashboard_delete_workflow': {
+          log(`Relaying ${msg.type} to agent`);
+          if (!sendToAgent(msg as unknown as Record<string, unknown>)) {
+            sendToDashboard({
+              type: 'agent_recording_error',
+              error: 'Agent is not connected.',
+            } as WebSocketMessage);
+          }
+          break;
+        }
+
+        // Agent → Dashboard relay (recording & workflow responses)
+        case 'agent_recording_started':
+        case 'agent_recording_stopped':
+        case 'agent_recording_parsing':
+        case 'agent_workflow_parsed':
+        case 'agent_workflow_list':
+        case 'agent_workflow_detail':
+        case 'agent_workflow_deleted':
+        case 'agent_recording_error': {
+          log(`Relaying ${msg.type} to dashboard`);
+          sendToDashboard(msg);
+          break;
+        }
+
         default:
           log(`Unknown message type: ${(msg as unknown as Record<string, unknown>).type}`);
       }

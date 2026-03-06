@@ -24,6 +24,7 @@ import {
 } from '@workflow-agent/shared';
 import { ReconnectManager } from './reconnect';
 import { handleIncomingMessage } from './command-handler';
+import { handleDashboardMessage, onConnectionLost, onConnectionRestored } from './dashboard-message-handler';
 import { log, warn, error as logError } from '../utils/logger';
 
 /** Timestamp prefix for log messages */
@@ -94,6 +95,7 @@ export class WebSocketClient {
       log(`[${timestamp()}] [ws-client] Connected to ${this.serverUrl}`);
       this.reconnectManager.reset();
       this.notifyStatus(true);
+      onConnectionRestored();
 
       // Send a "hello" registration message so the server knows who we are
       const hello: AgentHello = {
@@ -111,7 +113,11 @@ export class WebSocketClient {
       const raw = data.toString();
       log(`[${timestamp()}] [ws-client] Message received: ${raw.substring(0, 200)}${raw.length > 200 ? '...' : ''}`);
 
-      // Pass to the command handler for parsing and execution
+      // Try dashboard message handler first (recording, workflow CRUD)
+      const dashboardResponse = await handleDashboardMessage(raw, (msg: string) => this.send(msg));
+      if (dashboardResponse) return;
+
+      // Fall through to command handler for AgentCommand messages
       const response = await handleIncomingMessage(raw);
 
       // If the handler returned a response, send it back to the server
@@ -125,6 +131,7 @@ export class WebSocketClient {
       log(`[${timestamp()}] [ws-client] Connection closed (code: ${code}, reason: ${reason.toString() || 'none'})`);
       this.ws = null;
       this.notifyStatus(false);
+      onConnectionLost();
 
       if (!this.intentionalDisconnect) {
         this.scheduleReconnect();

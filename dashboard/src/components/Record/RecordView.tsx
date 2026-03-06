@@ -1,29 +1,35 @@
 import { useState } from 'react';
 import { useWorkflowStore } from '../../stores/workflowStore';
+import { useConnectionStore } from '../../stores/connectionStore';
 import { RecordingTip } from './RecordingTip';
 import styles from './RecordView.module.css';
 
-type RecordState = 'idle' | 'recording' | 'processing' | 'complete';
-
 export function RecordView() {
-  const [state, setState] = useState<RecordState>('idle');
   const [workflowName, setWorkflowName] = useState('');
+
+  const recordingState = useWorkflowStore((s) => s.recordingState);
+  const recordingError = useWorkflowStore((s) => s.recordingError);
+  const startRecording = useWorkflowStore((s) => s.startRecording);
+  const stopRecording = useWorkflowStore((s) => s.stopRecording);
+  const setRecordingState = useWorkflowStore((s) => s.setRecordingState);
   const executingWorkflow = useWorkflowStore((s) => s.executingWorkflow);
+  const agentConnected = useConnectionStore((s) => s.agentConnected);
 
   const handleStart = () => {
-    if (!workflowName.trim()) return;
-    setState('recording');
-    // TODO: Send WebSocket command to Local Agent to start recording
+    if (!workflowName.trim() || !agentConnected) return;
+    startRecording(workflowName.trim());
   };
 
   const handleStop = () => {
-    setState('processing');
-    // TODO: Send WebSocket command to stop recording
-    // Simulate processing
-    setTimeout(() => setState('complete'), 2000);
+    stopRecording();
   };
 
-  if (state === 'idle' && executingWorkflow) {
+  const handleRecordAnother = () => {
+    setRecordingState('idle');
+    setWorkflowName('');
+  };
+
+  if (recordingState === 'idle' && executingWorkflow) {
     return (
       <div className={styles.root}>
         <div className={styles.centered}>
@@ -37,7 +43,7 @@ export function RecordView() {
     );
   }
 
-  if (state === 'idle') {
+  if (recordingState === 'idle') {
     return (
       <div className={styles.root}>
         <div className={styles.centered}>
@@ -58,9 +64,9 @@ export function RecordView() {
             <button
               className={styles.startButton}
               onClick={handleStart}
-              disabled={!workflowName.trim()}
+              disabled={!workflowName.trim() || !agentConnected}
             >
-              Start Recording
+              {agentConnected ? 'Start Recording' : 'Connect local agent to record'}
             </button>
           </div>
         </div>
@@ -68,7 +74,7 @@ export function RecordView() {
     );
   }
 
-  if (state === 'recording') {
+  if (recordingState === 'recording') {
     return (
       <div className={styles.root}>
         <div className={styles.centered}>
@@ -87,7 +93,7 @@ export function RecordView() {
     );
   }
 
-  if (state === 'processing') {
+  if (recordingState === 'parsing') {
     return (
       <div className={styles.root}>
         <div className={styles.centered}>
@@ -100,6 +106,23 @@ export function RecordView() {
     );
   }
 
+  if (recordingState === 'error') {
+    return (
+      <div className={styles.root}>
+        <div className={styles.centered}>
+          <h2 className={styles.title}>Processing failed</h2>
+          <p className={styles.subtitle}>
+            {recordingError || 'Recording saved — try again later.'}
+          </p>
+          <button className={styles.startButton} onClick={handleRecordAnother}>
+            Record another
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // recordingState === 'complete'
   return (
     <div className={styles.root}>
       <div className={styles.centered}>
@@ -107,10 +130,7 @@ export function RecordView() {
         <p className={styles.subtitle}>
           "{workflowName}" has been added to your library. You can now ask the agent to run it.
         </p>
-        <button
-          className={styles.startButton}
-          onClick={() => { setState('idle'); setWorkflowName(''); }}
-        >
+        <button className={styles.startButton} onClick={handleRecordAnother}>
           Record another
         </button>
       </div>

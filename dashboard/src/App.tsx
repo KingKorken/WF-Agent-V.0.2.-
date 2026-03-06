@@ -8,6 +8,7 @@ import { RecordView } from './components/Record/RecordView';
 import { SettingsView } from './components/Settings/SettingsView';
 import { CalendarView } from './components/Calendar/CalendarView';
 import { EmailView } from './components/Email/EmailView';
+import { WorkflowLibraryView } from './components/WorkflowLibrary/WorkflowLibraryView';
 import { ConnectionBanner } from './components/shared/ConnectionBanner';
 import { OnboardingOverlay } from './components/Onboarding/OnboardingOverlay';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -106,6 +107,7 @@ export function App() {
             {activeTabId === 'settings' && <SettingsView />}
             {activeTabId === 'calendar' && <CalendarView />}
             {activeTabId === 'email' && <EmailView />}
+            {activeTabId === 'workflow-library' && <WorkflowLibraryView />}
           </div>
         </div>
         <OnboardingOverlay />
