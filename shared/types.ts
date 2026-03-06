@@ -410,6 +410,8 @@ export interface AgentHello {
   platform: string;
   /** Which layers are currently supported */
   supportedLayers: CommandLayer[];
+  /** Room token for multi-tenancy. Optional in local dev, required when deployed. */
+  roomId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +425,8 @@ export interface DashboardHello {
   dashboardId: string;
   /** Dashboard version */
   version: string;
+  /** Room token for multi-tenancy. Optional in local dev, required when deployed. */
+  roomId?: string;
 }
 
 /** Chat message from dashboard to server */

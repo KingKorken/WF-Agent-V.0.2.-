@@ -42,6 +42,9 @@ export class WebSocketClient {
   /** The server URL to connect to */
   private serverUrl: string;
 
+  /** Room token for multi-tenant bridge server (optional in local dev) */
+  private roomId: string | undefined;
+
   /** Manages reconnection with exponential backoff */
   private reconnectManager: ReconnectManager = new ReconnectManager();
 
@@ -51,8 +54,9 @@ export class WebSocketClient {
   /** Callback for connection status changes (used by the tray icon) */
   private statusCallback: ConnectionStatusCallback | null = null;
 
-  constructor(serverUrl: string = DEFAULT_WS_URL) {
+  constructor(serverUrl: string = DEFAULT_WS_URL, roomId?: string) {
     this.serverUrl = serverUrl;
+    this.roomId = roomId;
   }
 
   /**
@@ -104,6 +108,7 @@ export class WebSocketClient {
         version: APP_VERSION,
         platform: process.platform,
         supportedLayers: [...SUPPORTED_LAYERS] as CommandLayer[],
+        roomId: this.roomId,
       };
       this.send(JSON.stringify(hello));
     });

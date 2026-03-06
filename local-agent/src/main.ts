@@ -80,9 +80,13 @@ app.whenReady().then(() => {
   // Step 2: Set up the WebSocket connection
   // Use the WS_URL environment variable if set, otherwise use the default
   const serverUrl = process.env.WS_URL || DEFAULT_WS_URL;
+  const roomId = process.env.ROOM_ID || undefined;
   log(`[${timestamp()}] [main] Connecting to server: ${serverUrl}`);
+  if (roomId) {
+    log(`[${timestamp()}] [main] Room: ${roomId.substring(0, 8)}...`);
+  }
 
-  wsClient = new WebSocketClient(serverUrl);
+  wsClient = new WebSocketClient(serverUrl, roomId);
 
   // Update the tray icon when connection status changes
   wsClient.onStatusChange((connected) => {

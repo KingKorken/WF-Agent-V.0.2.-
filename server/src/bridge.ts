@@ -1,13 +1,12 @@
 /**
- * Bridge Server — Relays messages between the Dashboard and the Local Agent.
+ * Bridge Server — Relays messages between Dashboards and Local Agents.
  *
  * Architecture:
  *   Dashboard (browser WS) → Bridge Server ← Local Agent (Node WS)
  *
- * The bridge server:
- *   1. Accepts WebSocket connections from both the dashboard and the local agent
- *   2. Hosts the agent loop (Claude-powered observe-decide-act)
- *   3. Routes commands to the agent and responses back to the dashboard
+ * Room-based multi-tenancy: each tester gets a UUID room token.
+ * Their agent and dashboard both connect to the same room via the token.
+ * The bridge routes all messages within rooms, never across them.
  *
  * Run with:  npm run dev  (from the server/ directory)
  */
@@ -16,6 +15,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import Anthropic from '@anthropic-ai/sdk';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import * as http from 'http';
 import {
   DEFAULT_WS_PORT,
   AgentCommand,
@@ -41,7 +41,10 @@ if (!process.env.ANTHROPIC_API_KEY) {
   dotenv.config(); // cwd fallback
 }
 
+// ---------------------------------------------------------------------------
 // Agent loop types (mirrored from local-agent to avoid cross-package TS imports)
+// ---------------------------------------------------------------------------
+
 interface AgentLoopCallbacks {
   onStep?: (step: number, maxIterations: number) => void;
   onObservation?: (obs: unknown, step: number) => void;
@@ -75,17 +78,19 @@ let runAgentLoop: ((config: AgentLoopConfig) => Promise<AgentLoopResult>) | null
 let formatWorkflowAsGoal: ((workflow: unknown) => string) | null = null;
 
 async function loadAgentModules(): Promise<boolean> {
+  const basePath = process.env.AGENT_MODULES_PATH || path.join(__dirname, '../../local-agent/dist');
+
   try {
-    const agentLoopModule = require('../../local-agent/dist/src/agent/agent-loop');
+    const agentLoopModule = require(path.join(basePath, 'src/agent/agent-loop'));
     runAgentLoop = agentLoopModule.runAgentLoop;
 
-    const workflowModule = require('../../local-agent/dist/src/agent/workflow-executor');
+    const workflowModule = require(path.join(basePath, 'src/agent/workflow-executor'));
     formatWorkflowAsGoal = workflowModule.formatWorkflowAsGoal;
 
     log('Agent loop modules loaded successfully');
     return true;
   } catch (err) {
-    log(`Warning: Could not load agent loop modules: ${err instanceof Error ? err.message : String(err)}`);
+    log(`Warning: Could not load agent loop modules from ${basePath}: ${err instanceof Error ? err.message : String(err)}`);
     log('Agent loop features will be unavailable. Build local-agent first: cd local-agent && npm run build');
     return false;
   }
@@ -103,30 +108,223 @@ function log(message: string): void {
   console.log(`[${timestamp()}] [bridge] ${message}`);
 }
 
+function logRoom(roomId: string, message: string): void {
+  console.log(`[${timestamp()}] [room:${roomId.slice(0, 8)}] ${message}`);
+}
+
+// ---------------------------------------------------------------------------
+// Message validation (P1 security fix — thin validation at JSON.parse boundary)
+// ---------------------------------------------------------------------------
+
+const KNOWN_MESSAGE_TYPES = new Set([
+  'hello', 'dashboard_hello', 'result',
+  'dashboard_chat', 'dashboard_workflow_run', 'dashboard_workflow_cancel',
+  'dashboard_start_recording', 'dashboard_stop_recording',
+  'dashboard_list_workflows', 'dashboard_get_workflow', 'dashboard_delete_workflow',
+  'agent_recording_started', 'agent_recording_stopped', 'agent_recording_parsing',
+  'agent_workflow_parsed', 'agent_workflow_list', 'agent_workflow_detail',
+  'agent_workflow_deleted', 'agent_recording_error',
+]);
+
+function parseMessage(raw: string): WebSocketMessage | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    if (typeof obj.type !== 'string') return null;
+    // Reject prototype pollution keys
+    const keys = Object.keys(obj);
+    if (keys.includes('__proto__') || keys.includes('constructor') || keys.includes('prototype')) return null;
+    if (!KNOWN_MESSAGE_TYPES.has(obj.type)) return null;
+    return parsed as WebSocketMessage;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Room data structure
+// ---------------------------------------------------------------------------
+
+interface PendingCommand {
+  resolve: (result: AgentResult) => void;
+  reject: (error: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
+interface AgentInfo {
+  name: string;
+  version: string;
+  platform: string;
+  layers: string[];
+}
+
+class Room {
+  readonly id: string;
+  private _agentSocket: WebSocket | null = null;
+  private _dashboardSocket: WebSocket | null = null;
+  private _agentInfo: AgentInfo | null = null;
+  private _agentLoopActive = false;
+  private _commandCounter = 0;
+  private readonly _pendingCommands = new Map<string, PendingCommand>();
+  private readonly _chatHistories = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
+
+  constructor(id: string) {
+    this.id = id;
+  }
+
+  get agentSocket(): WebSocket | null { return this._agentSocket; }
+  get dashboardSocket(): WebSocket | null { return this._dashboardSocket; }
+  get agentInfo(): AgentInfo | null { return this._agentInfo; }
+  get isAgentConnected(): boolean { return this._agentSocket !== null && this._agentSocket.readyState === WebSocket.OPEN; }
+  get isDashboardConnected(): boolean { return this._dashboardSocket !== null && this._dashboardSocket.readyState === WebSocket.OPEN; }
+  get agentLoopActive(): boolean { return this._agentLoopActive; }
+  set agentLoopActive(val: boolean) { this._agentLoopActive = val; }
+  get chatHistories(): Map<string, Array<{ role: 'user' | 'assistant'; content: string }>> { return this._chatHistories; }
+
+  setAgentSocket(ws: WebSocket | null, info?: AgentInfo): void {
+    this._agentSocket = ws;
+    this._agentInfo = info ?? null;
+  }
+
+  clearAgentIfMatch(ws: WebSocket): boolean {
+    if (this._agentSocket === ws) {
+      this._agentSocket = null;
+      this._agentInfo = null;
+      return true;
+    }
+    return false;
+  }
+
+  setDashboardSocket(ws: WebSocket | null): void {
+    this._dashboardSocket = ws;
+  }
+
+  clearDashboardIfMatch(ws: WebSocket): boolean {
+    if (this._dashboardSocket === ws) {
+      this._dashboardSocket = null;
+      return true;
+    }
+    return false;
+  }
+
+  nextId(): string {
+    this._commandCounter++;
+    return `cmd_${this.id.slice(0, 8)}_${this._commandCounter}`;
+  }
+
+  sendToAgent(message: Record<string, unknown>): boolean {
+    if (!this._agentSocket || this._agentSocket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    this._agentSocket.send(JSON.stringify(message));
+    return true;
+  }
+
+  sendToDashboard(message: WebSocketMessage): void {
+    if (!this._dashboardSocket || this._dashboardSocket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    this._dashboardSocket.send(JSON.stringify(message));
+  }
+
+  broadcastAgentStatus(): void {
+    const status: ServerAgentStatus = {
+      type: 'server_agent_status',
+      agentConnected: this.isAgentConnected,
+      agentName: this._agentInfo?.name,
+      supportedLayers: this._agentInfo?.layers as ServerAgentStatus['supportedLayers'],
+    };
+    this.sendToDashboard(status);
+  }
+
+  rejectAllPending(reason: string): void {
+    for (const [id, pending] of this._pendingCommands) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(new Error(reason));
+    }
+    this._pendingCommands.clear();
+  }
+
+  sendCommandAndWait(command: AgentCommand, timeoutMs = 30000): Promise<AgentResult> {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        this._pendingCommands.delete(command.id);
+        reject(new Error(`Command ${command.id} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      this._pendingCommands.set(command.id, {
+        resolve: (result: AgentResult) => {
+          clearTimeout(timeoutId);
+          this._pendingCommands.delete(command.id);
+          resolve(result);
+        },
+        reject: (err: Error) => {
+          clearTimeout(timeoutId);
+          this._pendingCommands.delete(command.id);
+          reject(err);
+        },
+        timeoutId,
+      });
+
+      const sent = this.sendToAgent(command as unknown as Record<string, unknown>);
+      if (!sent) {
+        clearTimeout(timeoutId);
+        this._pendingCommands.delete(command.id);
+        reject(new Error('Failed to send command — agent not connected'));
+      }
+    });
+  }
+
+  handleCommandResult(result: AgentResult): void {
+    const pending = this._pendingCommands.get(result.id);
+    if (pending) {
+      pending.resolve(result);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
-let agentSocket: WebSocket | null = null;
-let dashboardSocket: WebSocket | null = null;
-let commandCounter = 0;
-let agentLoopActive = false;
+const rooms = new Map<string, Room>();
 let agentModulesLoaded = false;
 
-/** Agent info from hello message */
-let agentInfo: { name: string; version: string; platform: string; layers: string[] } | null = null;
-
-/** Pending command responses (same pattern as test-server) */
-const pendingCommands: Map<string, (result: AgentResult) => void> = new Map();
+/** Find which room a socket belongs to */
+function findRoomBySocket(ws: WebSocket): Room | undefined {
+  for (const room of rooms.values()) {
+    if (room.agentSocket === ws || room.dashboardSocket === ws) {
+      return room;
+    }
+  }
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
-// Simple Claude Chat (NOT the vision agent loop — just text conversation)
+// Rate limiting — single global counter (sufficient for 5 testers)
+// ---------------------------------------------------------------------------
+
+let globalChatCount = 0;
+const GLOBAL_CHAT_LIMIT = 60; // 60 messages per minute across all rooms
+
+setInterval(() => { globalChatCount = 0; }, 60_000);
+
+// ---------------------------------------------------------------------------
+// Origin validation
+// ---------------------------------------------------------------------------
+
+const ALLOWED_ORIGINS = new Set([
+  'https://wfa-v2.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+]);
+
+// ---------------------------------------------------------------------------
+// Simple Claude Chat
 // ---------------------------------------------------------------------------
 
 let anthropicClient: Anthropic | null = null;
-
-/** Per-conversation chat history for simple text chat with Claude */
-const chatHistories: Map<string, Array<{ role: 'user' | 'assistant'; content: string }>> = new Map();
 
 const CHAT_SYSTEM_PROMPT = `You are the assistant embedded in a B2B workflow automation platform. The platform helps companies automate repetitive tasks across HR, accounting, procurement, and operations.
 
@@ -151,23 +349,30 @@ function getAnthropicClient(): Anthropic | null {
   return anthropicClient;
 }
 
+/** Strip base64 image data from content before storing in chat history */
+function stripBase64(content: string): string {
+  // Replace base64 data URIs and raw base64 blocks (>100 chars of base64 chars)
+  return content.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]{100,}/g, '[screenshot omitted]');
+}
+
 /** Simple text chat with Claude — no vision, no screenshots, no agent loop */
-async function simpleChatWithClaude(conversationId: string, userMessage: string): Promise<string> {
+async function simpleChatWithClaude(room: Room, conversationId: string, userMessage: string): Promise<string> {
   const client = getAnthropicClient();
   if (!client) throw new Error('ANTHROPIC_API_KEY not configured');
 
-  // Get or create conversation history
-  if (!chatHistories.has(conversationId)) {
-    chatHistories.set(conversationId, []);
+  const histories = room.chatHistories;
+  if (!histories.has(conversationId)) {
+    histories.set(conversationId, []);
   }
-  const history = chatHistories.get(conversationId)!;
+  const history = histories.get(conversationId)!;
 
-  // Add user message
-  history.push({ role: 'user', content: userMessage });
+  // Strip base64 and cap message size before storing
+  const cleaned = stripBase64(userMessage).slice(0, 10_000);
+  history.push({ role: 'user', content: cleaned });
 
-  // Keep last 20 messages to avoid token bloat
-  if (history.length > 20) {
-    history.splice(0, history.length - 20);
+  // Keep last 50 messages to bound memory
+  if (history.length > 50) {
+    history.splice(0, history.length - 50);
   }
 
   const response = await client.messages.create({
@@ -177,190 +382,76 @@ async function simpleChatWithClaude(conversationId: string, userMessage: string)
     messages: history,
   });
 
-  // Extract text response
   const assistantText = response.content
     .filter((block): block is Anthropic.TextBlock => block.type === 'text')
     .map((block) => block.text)
     .join('\n');
 
-  // Add to history
   history.push({ role: 'assistant', content: assistantText });
 
   return assistantText;
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function nextId(): string {
-  commandCounter++;
-  return `cmd_${commandCounter}`;
-}
-
-/** Send a message to the local agent */
-function sendToAgent(message: Record<string, unknown>): boolean {
-  if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
-    return false;
-  }
-  agentSocket.send(JSON.stringify(message));
-  return true;
-}
-
-/** Send a message to the dashboard */
-function sendToDashboard(message: WebSocketMessage): void {
-  if (!dashboardSocket || dashboardSocket.readyState !== WebSocket.OPEN) {
-    return;
-  }
-  dashboardSocket.send(JSON.stringify(message));
-}
-
-/** Send agent status to dashboard */
-function broadcastAgentStatus(): void {
-  const status: ServerAgentStatus = {
-    type: 'server_agent_status',
-    agentConnected: agentSocket !== null && agentSocket.readyState === WebSocket.OPEN,
-    agentName: agentInfo?.name,
-    supportedLayers: agentInfo?.layers as ServerAgentStatus['supportedLayers'],
-  };
-  sendToDashboard(status);
-}
-
-/**
- * Send a command to the agent and wait for the result.
- * Same pattern as test-server's sendCommandAndWait (lines 314-334).
- */
-function sendCommandAndWait(command: AgentCommand, timeoutMs: number = 30000): Promise<AgentResult> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pendingCommands.delete(command.id);
-      reject(new Error(`Command ${command.id} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    pendingCommands.set(command.id, (result: AgentResult) => {
-      clearTimeout(timer);
-      pendingCommands.delete(command.id);
-      resolve(result);
-    });
-
-    const sent = sendToAgent(command as unknown as Record<string, unknown>);
-    if (!sent) {
-      clearTimeout(timer);
-      pendingCommands.delete(command.id);
-      reject(new Error('Failed to send command — agent not connected'));
-    }
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Direct command parser (/shell, /browser, /ax, /vision)
 // ---------------------------------------------------------------------------
 
-function parseDirectCommand(content: string): AgentCommand | null {
+function parseDirectCommand(room: Room, content: string): AgentCommand | null {
   const trimmed = content.trim();
 
-  // /shell <command>
   if (trimmed.startsWith('/shell ')) {
-    const shellCmd = trimmed.slice(7).trim();
     return {
       type: 'command',
-      id: nextId(),
+      id: room.nextId(),
       layer: 'shell',
       action: 'exec',
-      params: { command: shellCmd },
+      params: { command: trimmed.slice(7).trim() },
     };
   }
 
-  // /browser <action> [args...]
   if (trimmed.startsWith('/browser ')) {
     const parts = trimmed.slice(9).trim().split(/\s+/);
     const action = parts[0] || 'snapshot';
     const params: Record<string, unknown> = {};
-
     switch (action) {
-      case 'navigate':
-        params.url = parts.slice(1).join(' ');
-        break;
-      case 'click':
-        params.ref = parts[1];
-        break;
-      case 'type':
-        params.ref = parts[1];
-        params.text = parts.slice(2).join(' ');
-        break;
-      case 'select':
-        params.ref = parts[1];
-        params.value = parts.slice(2).join(' ');
-        break;
+      case 'navigate': params.url = parts.slice(1).join(' '); break;
+      case 'click': params.ref = parts[1]; break;
+      case 'type': params.ref = parts[1]; params.text = parts.slice(2).join(' '); break;
+      case 'select': params.ref = parts[1]; params.value = parts.slice(2).join(' '); break;
     }
-
-    return {
-      type: 'command',
-      id: nextId(),
-      layer: 'cdp',
-      action,
-      params,
-    };
+    return { type: 'command', id: room.nextId(), layer: 'cdp', action, params };
   }
 
-  // /ax <action> [args...]
   if (trimmed.startsWith('/ax ')) {
     const parts = trimmed.slice(4).trim().split(/\s+/);
     const action = parts[0] || 'snapshot';
     const params: Record<string, unknown> = {};
-
     switch (action) {
-      case 'tree':
-      case 'snapshot':
-      case 'windows':
-        params.app = parts.slice(1).join(' ');
-        break;
-      case 'click':
-      case 'press_button':
-      case 'focus':
-      case 'getvalue':
-        params.ref = parts[1];
-        break;
+      case 'tree': case 'snapshot': case 'windows':
+        params.app = parts.slice(1).join(' '); break;
+      case 'click': case 'press_button': case 'focus': case 'getvalue':
+        params.ref = parts[1]; break;
       case 'setvalue':
-        params.ref = parts[1];
-        params.value = parts.slice(2).join(' ');
-        break;
+        params.ref = parts[1]; params.value = parts.slice(2).join(' '); break;
     }
-
     return {
-      type: 'command',
-      id: nextId(),
-      layer: 'accessibility',
-      action: action === 'click' ? 'press_button' : action,
-      params,
+      type: 'command', id: room.nextId(),
+      layer: 'accessibility', action: action === 'click' ? 'press_button' : action, params,
     };
   }
 
-  // /vision <action> [args...]
   if (trimmed.startsWith('/vision ')) {
     const parts = trimmed.slice(8).trim().split(/\s+/);
     const action = parts[0] || 'screenshot';
     const params: Record<string, unknown> = {};
-
     switch (action) {
-      case 'click':
-        params.x = parseInt(parts[1], 10);
-        params.y = parseInt(parts[2], 10);
-        break;
-      case 'type':
-        params.text = parts.slice(1).join(' ');
-        break;
-      case 'key':
-        params.keys = parts.slice(1);
-        break;
+      case 'click': params.x = parseInt(parts[1], 10); params.y = parseInt(parts[2], 10); break;
+      case 'type': params.text = parts.slice(1).join(' '); break;
+      case 'key': params.keys = parts.slice(1); break;
     }
-
     return {
-      type: 'command',
-      id: nextId(),
-      layer: 'vision',
-      action: action === 'key' ? 'key_combo' : action,
-      params,
+      type: 'command', id: room.nextId(),
+      layer: 'vision', action: action === 'key' ? 'key_combo' : action, params,
     };
   }
 
@@ -368,325 +459,435 @@ function parseDirectCommand(content: string): AgentCommand | null {
 }
 
 // ---------------------------------------------------------------------------
-// Chat message handler
+// Chat message handler (room-scoped)
 // ---------------------------------------------------------------------------
 
-async function handleChatMessage(msg: DashboardChatMessage): Promise<void> {
+async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise<void> {
   const { id, conversationId, content, isDirect } = msg;
 
-  // Direct command mode (/shell, /browser, /ax, /vision) — requires agent connection
+  // Rate limit check
+  if (globalChatCount >= GLOBAL_CHAT_LIMIT) {
+    room.sendToDashboard({
+      type: 'server_chat_response',
+      conversationId,
+      message: {
+        id: `resp_${id}`,
+        role: 'system',
+        type: 'error',
+        content: 'Rate limit reached. Please wait a moment before sending more messages.',
+      },
+    });
+    return;
+  }
+  globalChatCount++;
+
+  // Direct command mode (/shell, /browser, /ax, /vision)
   if (isDirect) {
-    if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
-      sendToDashboard({
+    if (!room.isAgentConnected) {
+      room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: {
-          id: `resp_${id}`,
-          role: 'system',
-          type: 'error',
-          content: 'Agent is not connected. Start the local agent and try again.',
-        },
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'Agent is not connected. Start the local agent and try again.' },
       });
       return;
     }
 
-    const command = parseDirectCommand(content);
+    const command = parseDirectCommand(room, content);
     if (!command) {
-      sendToDashboard({
+      room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: {
-          id: `resp_${id}`,
-          role: 'system',
-          type: 'error',
-          content: `Unknown direct command. Supported: /shell, /browser, /ax, /vision`,
-        },
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'Unknown direct command. Supported: /shell, /browser, /ax, /vision' },
       });
       return;
     }
 
     try {
-      const result = await sendCommandAndWait(command);
-      sendToDashboard({
+      const result = await room.sendCommandAndWait(command);
+      room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
         message: {
-          id: `resp_${id}`,
-          role: 'agent',
-          type: 'text',
+          id: `resp_${id}`, role: 'agent', type: 'text',
           content: result.status === 'success'
             ? `\`\`\`\n${JSON.stringify(result.data, null, 2)}\n\`\`\``
             : `Error: ${JSON.stringify(result.data)}`,
         },
       });
     } catch (err) {
-      sendToDashboard({
+      room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: {
-          id: `resp_${id}`,
-          role: 'system',
-          type: 'error',
-          content: `Command failed: ${err instanceof Error ? err.message : String(err)}`,
-        },
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: `Command failed: ${err instanceof Error ? err.message : String(err)}` },
       });
     }
     return;
   }
 
-  // Normal chat — simple text conversation with Claude (NO vision, NO screenshots)
-  // This is cheap (~500-2000 tokens per exchange, NOT 15K+ per agent loop step)
+  // Normal chat — simple text conversation with Claude
   if (!process.env.ANTHROPIC_API_KEY) {
-    sendToDashboard({
+    room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
-      message: {
-        id: `resp_${id}`,
-        role: 'system',
-        type: 'error',
-        content: 'ANTHROPIC_API_KEY not configured. Add it to .env at the repo root.',
-      },
+      message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'ANTHROPIC_API_KEY not configured.' },
     });
     return;
   }
 
-  log(`Chat message: "${content.substring(0, 80)}"`);
+  logRoom(room.id, `Chat: "${content.substring(0, 80)}"`);
 
   try {
-    const reply = await simpleChatWithClaude(conversationId, content);
-    sendToDashboard({
+    const reply = await simpleChatWithClaude(room, conversationId, content);
+    room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
-      message: {
-        id: `resp_${id}`,
-        role: 'agent',
-        type: 'text',
-        content: reply,
-      },
+      message: { id: `resp_${id}`, role: 'agent', type: 'text', content: reply },
     });
   } catch (err) {
-    sendToDashboard({
+    room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
-      message: {
-        id: `resp_${id}`,
-        role: 'system',
-        type: 'error',
-        content: `Chat error: ${err instanceof Error ? err.message : String(err)}`,
-      },
+      message: { id: `resp_${id}`, role: 'system', type: 'error', content: `Chat error: ${err instanceof Error ? err.message : String(err)}` },
     });
   }
 }
 
 // ---------------------------------------------------------------------------
-// Workflow execution handler
+// Workflow execution handler (room-scoped)
 // ---------------------------------------------------------------------------
 
-async function handleWorkflowRun(msg: DashboardWorkflowRun): Promise<void> {
+async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise<void> {
   const { workflowId, workflowName } = msg;
 
   if (!agentModulesLoaded || !process.env.ANTHROPIC_API_KEY) {
-    sendToDashboard({
-      type: 'server_workflow_progress',
-      workflowId,
-      step: 0,
-      totalSteps: 0,
-      currentStepName: 'Error',
-      status: 'error',
+    room.sendToDashboard({
+      type: 'server_workflow_progress', workflowId,
+      step: 0, totalSteps: 0, currentStepName: 'Error', status: 'error',
       summary: 'Agent loop modules not available or API key missing.',
     });
     return;
   }
 
-  if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
-    sendToDashboard({
-      type: 'server_workflow_progress',
-      workflowId,
-      step: 0,
-      totalSteps: 0,
-      currentStepName: 'Error',
-      status: 'error',
+  if (!room.isAgentConnected) {
+    room.sendToDashboard({
+      type: 'server_workflow_progress', workflowId,
+      step: 0, totalSteps: 0, currentStepName: 'Error', status: 'error',
       summary: 'Agent is not connected.',
     });
     return;
   }
 
-  if (agentLoopActive) {
-    sendToDashboard({
-      type: 'server_workflow_progress',
-      workflowId,
-      step: 0,
-      totalSteps: 0,
-      currentStepName: 'Error',
-      status: 'error',
+  if (room.agentLoopActive) {
+    room.sendToDashboard({
+      type: 'server_workflow_progress', workflowId,
+      step: 0, totalSteps: 0, currentStepName: 'Error', status: 'error',
       summary: 'Another task is already running.',
     });
     return;
   }
 
-  agentLoopActive = true;
-  log(`Running workflow: ${workflowName} (${workflowId})`);
+  room.agentLoopActive = true;
+  logRoom(room.id, `Running workflow: ${workflowName} (${workflowId})`);
 
-  // For now, use the workflow name as the goal directly
-  // In the future, load the actual workflow JSON and call formatWorkflowAsGoal()
   const goal = `Execute the workflow "${workflowName}". Follow standard operating procedures for this type of task.`;
 
   try {
     const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '10', 10);
     const result = await runAgentLoop!({
       goal,
-      sendAndWait: sendCommandAndWait,
+      sendAndWait: (cmd) => room.sendCommandAndWait(cmd),
       maxIterations: maxIter,
       callbacks: {
         onStep: (step: number, maxIterations: number) => {
-          sendToDashboard({
-            type: 'server_workflow_progress',
-            workflowId,
-            step,
-            totalSteps: maxIterations,
-            currentStepName: `Step ${step}`,
-            status: 'running',
+          room.sendToDashboard({
+            type: 'server_workflow_progress', workflowId,
+            step, totalSteps: maxIterations, currentStepName: `Step ${step}`, status: 'running',
           });
         },
-        onAction: (command: AgentCommand, thinking: string) => {
-          sendToDashboard({
-            type: 'server_workflow_progress',
-            workflowId,
-            step: 0,
-            totalSteps: 0,
-            currentStepName: thinking.substring(0, 100),
-            status: 'running',
+        onAction: (_command: AgentCommand, thinking: string) => {
+          room.sendToDashboard({
+            type: 'server_workflow_progress', workflowId,
+            step: 0, totalSteps: 0, currentStepName: thinking.substring(0, 100), status: 'running',
           });
         },
       },
     });
 
-    sendToDashboard({
-      type: 'server_workflow_progress',
-      workflowId,
-      step: result.steps,
-      totalSteps: result.steps,
-      currentStepName: 'Complete',
+    room.sendToDashboard({
+      type: 'server_workflow_progress', workflowId,
+      step: result.steps, totalSteps: result.steps, currentStepName: 'Complete',
       status: result.outcome === 'complete' ? 'complete' : 'error',
       summary: result.summary,
     });
   } catch (err) {
-    sendToDashboard({
-      type: 'server_workflow_progress',
-      workflowId,
-      step: 0,
-      totalSteps: 0,
-      currentStepName: 'Error',
-      status: 'error',
+    room.sendToDashboard({
+      type: 'server_workflow_progress', workflowId,
+      step: 0, totalSteps: 0, currentStepName: 'Error', status: 'error',
       summary: `Workflow failed: ${err instanceof Error ? err.message : String(err)}`,
     });
   } finally {
-    agentLoopActive = false;
+    room.agentLoopActive = false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket Server
+// Room validation
+// ---------------------------------------------------------------------------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function hasRoomId<T extends { roomId?: string }>(msg: T): msg is T & { roomId: string } {
+  return typeof msg.roomId === 'string' && msg.roomId.length > 0;
+}
+
+function initializeRooms(): void {
+  const roomsEnv = process.env.VALID_ROOMS;
+  if (!roomsEnv) {
+    // Local dev mode — no rooms pre-configured, allow any room ID
+    log('No VALID_ROOMS set — running in local dev mode (single room, no auth)');
+    return;
+  }
+
+  const tokens = roomsEnv.split(',').map((s) => s.trim()).filter(Boolean);
+  if (tokens.length === 0) {
+    log('VALID_ROOMS is empty — running in local dev mode');
+    return;
+  }
+
+  for (const token of tokens) {
+    if (!UUID_RE.test(token)) {
+      console.error(`VALID_ROOMS contains invalid UUID: ${token}`);
+      process.exit(1);
+    }
+    rooms.set(token, new Room(token));
+  }
+
+  log(`Loaded ${rooms.size} valid rooms`);
+}
+
+/** In local dev mode (no VALID_ROOMS), create rooms on demand */
+function getOrCreateRoom(roomId: string): Room {
+  let room = rooms.get(roomId);
+  if (!room) {
+    // Only allow dynamic room creation in local dev (no VALID_ROOMS set)
+    if (process.env.VALID_ROOMS) {
+      throw new Error('Unknown room ID');
+    }
+    room = new Room(roomId);
+    rooms.set(roomId, room);
+  }
+  return room;
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket Server with HTTP health endpoint
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  // Try to load agent modules
   agentModulesLoaded = await loadAgentModules();
+  initializeRooms();
 
-  const wss = new WebSocketServer({ port: DEFAULT_WS_PORT });
-  log(`WebSocket server started on ws://localhost:${DEFAULT_WS_PORT}`);
-  log('Waiting for connections from dashboard and/or local agent...');
+  const port = Number(process.env.PORT) || DEFAULT_WS_PORT;
+
+  // HTTP server for health checks
+  const httpServer = http.createServer((req, res) => {
+    if (req.url === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+
+  // WebSocket server with noServer for Origin validation
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: 5 * 1024 * 1024, // 5MB — screenshots are 100-500KB base64 (P1 fix: was 64KB)
+  });
+
+  // Origin validation on HTTP upgrade
+  httpServer.on('upgrade', (request, socket, head) => {
+    const origin = request.headers.origin;
+    if (origin && !ALLOWED_ORIGINS.has(origin)) {
+      log(`Rejected connection from origin: ${origin}`);
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    // No origin = allow (Electron agent has no browser origin)
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  });
+
+  // Ping/pong heartbeat — prevents zombie connections
+  const aliveClients = new Set<WebSocket>();
+
+  const heartbeatInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (!aliveClients.has(ws)) {
+        ws.terminate();
+        return;
+      }
+      aliveClients.delete(ws);
+      ws.ping();
+    });
+  }, 45_000); // 45s interval — gives event loop headroom
+
+  // ---------------------------------------------------------------------------
+  // Connection handler
+  // ---------------------------------------------------------------------------
 
   wss.on('connection', (ws: WebSocket) => {
     log('New WebSocket connection');
+    aliveClients.add(ws);
+    ws.on('pong', () => { aliveClients.add(ws); });
 
     ws.on('message', (data: Buffer) => {
       const raw = data.toString();
-
-      let msg: WebSocketMessage;
-      try {
-        msg = JSON.parse(raw);
-      } catch {
-        log('Received malformed message, ignoring');
+      const msg = parseMessage(raw);
+      if (!msg) {
+        log('Received invalid message, ignoring');
         return;
       }
 
       switch (msg.type) {
-        // Local Agent connected
+        // ----- Local Agent connected -----
         case 'hello': {
           const hello = msg as AgentHello;
-          agentSocket = ws;
-          agentInfo = {
+
+          // Room validation
+          const roomId = hello.roomId;
+          if (!roomId && process.env.VALID_ROOMS) {
+            ws.close(1008, 'Room ID required');
+            return;
+          }
+
+          // Local dev fallback — use 'default' room
+          const effectiveRoomId = roomId || 'default';
+
+          let room: Room;
+          try {
+            room = getOrCreateRoom(effectiveRoomId);
+          } catch {
+            ws.close(1008, 'Unknown room ID');
+            return;
+          }
+
+          // Replace old agent connection (close old, accept new — better UX for restarts)
+          if (room.agentSocket && room.agentSocket !== ws && room.agentSocket.readyState === WebSocket.OPEN) {
+            logRoom(effectiveRoomId, 'Replacing existing agent connection');
+            room.rejectAllPending('Agent replaced by new connection');
+            room.agentSocket.close(1008, 'Replaced by new agent connection');
+          }
+
+          room.setAgentSocket(ws, {
             name: hello.agentName,
             version: hello.version,
             platform: hello.platform,
             layers: hello.supportedLayers,
-          };
-          log(`Agent connected: ${hello.agentName} v${hello.version} (${hello.platform})`);
-          log(`Supported layers: ${hello.supportedLayers.join(', ')}`);
-          broadcastAgentStatus();
+          });
+
+          logRoom(effectiveRoomId, `Agent connected: ${hello.agentName} v${hello.version} (${hello.platform})`);
+          room.broadcastAgentStatus();
           break;
         }
 
-        // Dashboard connected
+        // ----- Dashboard connected -----
         case 'dashboard_hello': {
           const dhello = msg as DashboardHello;
-          dashboardSocket = ws;
-          log(`Dashboard connected: ${dhello.dashboardId} v${dhello.version}`);
-          broadcastAgentStatus();
+
+          const roomId = dhello.roomId;
+          if (!roomId && process.env.VALID_ROOMS) {
+            ws.close(1008, 'Room ID required');
+            return;
+          }
+
+          const effectiveRoomId = roomId || 'default';
+
+          let room: Room;
+          try {
+            room = getOrCreateRoom(effectiveRoomId);
+          } catch {
+            ws.close(1008, 'Unknown room ID');
+            return;
+          }
+
+          // Replace old dashboard connection
+          if (room.dashboardSocket && room.dashboardSocket !== ws && room.dashboardSocket.readyState === WebSocket.OPEN) {
+            logRoom(effectiveRoomId, 'Replacing existing dashboard connection');
+            room.dashboardSocket.close(1008, 'Replaced by new dashboard connection');
+          }
+
+          room.setDashboardSocket(ws);
+          logRoom(effectiveRoomId, `Dashboard connected: ${dhello.dashboardId} v${dhello.version}`);
+          // Immediately broadcast agent status so dashboard gets initial state
+          room.broadcastAgentStatus();
           break;
         }
 
-        // Agent command result
+        // ----- Agent command result -----
         case 'result': {
           const result = msg as AgentResult;
-          const handler = pendingCommands.get(result.id);
-          if (handler) {
-            handler(result);
+          const room = findRoomBySocket(ws);
+          if (room) {
+            room.handleCommandResult(result);
           }
           break;
         }
 
-        // Dashboard chat message
+        // ----- Dashboard chat message -----
         case 'dashboard_chat': {
-          handleChatMessage(msg as DashboardChatMessage).catch((err) => {
-            log(`Chat handler error: ${err instanceof Error ? err.message : String(err)}`);
-          });
+          const room = findRoomBySocket(ws);
+          if (room) {
+            handleChatMessage(room, msg as DashboardChatMessage).catch((err) => {
+              logRoom(room.id, `Chat handler error: ${err instanceof Error ? err.message : String(err)}`);
+            });
+          }
           break;
         }
 
-        // Dashboard workflow run
+        // ----- Dashboard workflow run -----
         case 'dashboard_workflow_run': {
-          handleWorkflowRun(msg as DashboardWorkflowRun).catch((err) => {
-            log(`Workflow handler error: ${err instanceof Error ? err.message : String(err)}`);
-          });
+          const room = findRoomBySocket(ws);
+          if (room) {
+            handleWorkflowRun(room, msg as DashboardWorkflowRun).catch((err) => {
+              logRoom(room.id, `Workflow handler error: ${err instanceof Error ? err.message : String(err)}`);
+            });
+          }
           break;
         }
 
-        // Dashboard workflow cancel
+        // ----- Dashboard workflow cancel -----
         case 'dashboard_workflow_cancel': {
-          // TODO: Implement agent loop cancellation
-          log(`Workflow cancel requested: ${(msg as DashboardWorkflowCancel).workflowId}`);
+          const room = findRoomBySocket(ws);
+          if (room) {
+            logRoom(room.id, `Workflow cancel requested: ${(msg as DashboardWorkflowCancel).workflowId}`);
+          }
           break;
         }
 
-        // Dashboard → Agent relay (recording & workflow CRUD)
+        // ----- Dashboard → Agent relay (recording & workflow CRUD) -----
         case 'dashboard_start_recording':
         case 'dashboard_stop_recording':
         case 'dashboard_list_workflows':
         case 'dashboard_get_workflow':
         case 'dashboard_delete_workflow': {
-          log(`Relaying ${msg.type} to agent`);
-          if (!sendToAgent(msg as unknown as Record<string, unknown>)) {
-            sendToDashboard({
-              type: 'agent_recording_error',
-              error: 'Agent is not connected.',
-            } as WebSocketMessage);
+          const room = findRoomBySocket(ws);
+          if (room) {
+            logRoom(room.id, `Relaying ${msg.type} to agent`);
+            if (!room.sendToAgent(msg as unknown as Record<string, unknown>)) {
+              room.sendToDashboard({
+                type: 'agent_recording_error',
+                error: 'Agent is not connected.',
+              } as WebSocketMessage);
+            }
           }
           break;
         }
 
-        // Agent → Dashboard relay (recording & workflow responses)
+        // ----- Agent → Dashboard relay (recording & workflow responses) -----
         case 'agent_recording_started':
         case 'agent_recording_stopped':
         case 'agent_recording_parsing':
@@ -695,8 +896,11 @@ async function main(): Promise<void> {
         case 'agent_workflow_detail':
         case 'agent_workflow_deleted':
         case 'agent_recording_error': {
-          log(`Relaying ${msg.type} to dashboard`);
-          sendToDashboard(msg);
+          const room = findRoomBySocket(ws);
+          if (room) {
+            logRoom(room.id, `Relaying ${msg.type} to dashboard`);
+            room.sendToDashboard(msg);
+          }
           break;
         }
 
@@ -706,17 +910,21 @@ async function main(): Promise<void> {
     });
 
     ws.on('close', () => {
-      if (ws === agentSocket) {
-        log('Agent disconnected');
-        agentSocket = null;
-        agentInfo = null;
-        broadcastAgentStatus();
-      } else if (ws === dashboardSocket) {
-        log('Dashboard disconnected');
-        dashboardSocket = null;
-      } else {
-        log('Unknown client disconnected');
+      aliveClients.delete(ws);
+      for (const room of rooms.values()) {
+        if (room.clearAgentIfMatch(ws)) {
+          logRoom(room.id, 'Agent disconnected');
+          room.rejectAllPending('Agent disconnected');
+          room.agentLoopActive = false;
+          room.broadcastAgentStatus();
+          return;
+        }
+        if (room.clearDashboardIfMatch(ws)) {
+          logRoom(room.id, 'Dashboard disconnected');
+          return;
+        }
       }
+      log('Unknown client disconnected');
     });
 
     ws.on('error', (err) => {
@@ -724,23 +932,34 @@ async function main(): Promise<void> {
     });
   });
 
-  // Handle process signals
-  process.on('SIGINT', () => {
-    log('Shutting down...');
-    wss.close();
-    process.exit(0);
-  });
+  // ---------------------------------------------------------------------------
+  // Graceful shutdown
+  // ---------------------------------------------------------------------------
 
-  process.on('SIGTERM', () => {
-    log('Shutting down...');
-    wss.close();
-    process.exit(0);
+  function shutdown(signal: string): void {
+    log(`${signal} received, shutting down...`);
+    clearInterval(heartbeatInterval);
+    for (const client of wss.clients) {
+      client.close(1001, 'Server shutting down');
+    }
+    wss.close(() => process.exit(0));
+    // Force exit after 5 seconds if graceful close stalls
+    setTimeout(() => process.exit(1), 5000);
+  }
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Start listening
+  httpServer.listen(port, '0.0.0.0', () => {
+    log(`Bridge server started on 0.0.0.0:${port}`);
+    log(`Health check: http://localhost:${port}/health`);
+    log('Waiting for connections from dashboard and/or local agent...');
   });
 }
 
 // Global error handlers — prevent crashes from orphaned connections
 process.on('uncaughtException', (err: Error) => {
-  // EIO / EPIPE errors are non-fatal (broken pipe when client disconnects)
   if (err.message && (err.message.includes('EIO') || err.message.includes('EPIPE'))) {
     return;
   }

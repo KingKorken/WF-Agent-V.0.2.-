@@ -1,0 +1,33 @@
+# Dependencies
+node_modules
+
+# Build outputs (rebuilt in container)
+dist
+shared/dist
+server/dist
+local-agent/dist
+dashboard/dist
+
+# Development & editor files
+.git
+.gitignore
+*.md
+.env*
+.DS_Store
+.vscode
+.idea
+
+# Electron / desktop agent (not needed on server)
+local-agent/src
+local-agent/test
+
+# Dashboard source (hosted on Vercel, not in this container)
+dashboard/src
+dashboard/public
+dashboard/index.html
+dashboard/vite.config.ts
+dashboard/tsconfig*.json
+
+# Fly.io config (don't embed in image)
+fly.toml
+Dockerfile

@@ -6,10 +6,9 @@ interface ConnectionState {
   /** WebSocket connection to bridge server */
   status: ConnectionStatus;
   lastConnected: Date | null;
-  reconnectAttempts: number;
   /** True once a successful connection has been made this session */
   hasConnectedOnce: boolean;
-  /** True when running on a deployed host (Vercel) — no bridge server available */
+  /** True when running on a deployed host with no bridge configured */
   isDeployed: boolean;
 
   /** Whether the local agent is connected to the bridge */
@@ -17,22 +16,24 @@ interface ConnectionState {
   agentName: string | null;
   supportedLayers: string[];
 
+  /** Room token from URL (populated by message-router on init) */
+  roomId: string | null;
+
   setStatus: (status: ConnectionStatus) => void;
   setDeployed: () => void;
-  incrementReconnect: () => void;
-  resetReconnect: () => void;
   setAgentStatus: (connected: boolean, name: string | null, layers: string[]) => void;
+  setRoomId: (roomId: string | null) => void;
 }
 
 export const useConnectionStore = create<ConnectionState>((set) => ({
   status: 'disconnected',
   lastConnected: null,
-  reconnectAttempts: 0,
   hasConnectedOnce: false,
   isDeployed: false,
   agentConnected: false,
   agentName: null,
   supportedLayers: [],
+  roomId: null,
 
   setStatus: (status) =>
     set((state) => ({
@@ -41,13 +42,11 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
       hasConnectedOnce: state.hasConnectedOnce || status === 'connected',
     })),
   setDeployed: () => set({ isDeployed: true, status: 'disconnected' }),
-  incrementReconnect: () =>
-    set((state) => ({ reconnectAttempts: state.reconnectAttempts + 1 })),
-  resetReconnect: () => set({ reconnectAttempts: 0 }),
   setAgentStatus: (connected, name, layers) =>
     set({
       agentConnected: connected,
       agentName: name,
       supportedLayers: layers,
     }),
+  setRoomId: (roomId) => set({ roomId }),
 }));
