@@ -1,83 +1,106 @@
 # Tester Setup Guide
 
-How to connect your local Electron agent to the deployed bridge server and Vercel dashboard.
+Install WFA Agent on your Mac and connect it to the dashboard.
 
-## Prerequisites
+## What You Need
 
-- Node.js 18+
-- npm
-- The room token assigned to you (a UUID like `a1b2c3d4-e5f6-7890-abcd-ef1234567890`)
+- A Mac (macOS 13 Ventura or later)
+- Your room token (a UUID like `a1b2c3d4-e5f6-4890-abcd-ef1234567890`) -- from your setup email
+- Your dashboard URL -- from your setup email
 
-## 1. Build the local agent
+## 1. Install the App
 
-```bash
-git clone <repo-url> && cd WF-Agent-V.0.2.-
-npm install
-npm run build --workspace=@workflow-agent/shared
-npm run build --workspace=@workflow-agent/local-agent
-```
+1. Download the DMG file from the link in your setup email
+2. Open the DMG file
+3. Drag "WFA Agent" to your Applications folder
+4. Open WFA Agent from Applications
 
-## 2. Start the local agent
+**macOS Security Warning (first time only):**
 
-Set two environment variables and launch:
+macOS will block the app because it is not signed. To allow it:
 
-```bash
-WS_URL=wss://wfa-bridge.fly.dev \
-ROOM_ID=<your-room-token> \
-npm run dev --workspace=@workflow-agent/local-agent
-```
+1. Go to **System Settings** > **Privacy & Security**
+2. Scroll down -- you will see a message about "WFA Agent" being blocked
+3. Click **Open Anyway**
+4. Click **Open** in the confirmation dialog
 
-Replace `<your-room-token>` with the UUID assigned to you.
+## 2. Enter Your Room Token
 
-You should see:
+On first launch, the setup screen appears:
 
-```
-[ws-client] Connected to wss://wfa-bridge.fly.dev
-```
+1. Paste the room token from your setup email
+2. Click **Connect**
+3. Wait for the connection to confirm
 
-The system tray icon will turn green when connected.
+If it says "Connection failed", check that your token is correct and try again.
 
-## 3. Open the dashboard
+## 3. Grant macOS Permissions
 
-Open this URL in your browser (replace the room token):
+WFA Agent needs three permissions to record and replay workflows:
+
+| Permission | What it does | How to grant |
+|---|---|---|
+| **Accessibility** | Controls other apps (clicks, typing) | Click "Grant" -- System Settings opens. Add WFA Agent to the list. |
+| **Screen Recording** | Captures screenshots during recording | Click "Grant" -- System Settings opens. Add WFA Agent to the list. |
+| **Microphone** | Records your voice narration | A system dialog will appear. Click "Allow". |
+
+**After granting Accessibility and Screen Recording, you must quit and reopen the app.**
+
+These permissions may prompt again monthly on macOS Sequoia -- this is normal macOS behavior.
+
+## 4. Open the Dashboard
+
+Open this URL in your browser (replace with your actual values):
 
 ```
 https://<vercel-dashboard-url>?room=<your-room-token>
 ```
 
-The dashboard should show "Connected" and the agent status should appear.
+The dashboard should show "Connected" with your agent listed.
 
-## 4. Verify the connection
+## 5. Test It
 
-1. The sidebar should show your agent name and supported layers
-2. Navigate to the Record tab -- the button should say "Start Recording" (not "Connect local agent to record")
-3. Try sending a chat message -- you should get a response
+1. Navigate to the **Record** tab
+2. Click **Start Recording**
+3. Do a short task on your Mac (open an app, type something, close it)
+4. Click **Stop Recording**
+5. The recording will be parsed into a workflow
+6. Try running the workflow from the **Workflows** tab
 
 ## Troubleshooting
 
-### Dashboard says "Disconnected" or "Connection error"
+### App won't open
 
-- Check that `?room=<uuid>` is in the URL
-- Verify the bridge server is running: visit `https://wfa-bridge.fly.dev/health`
-- Check browser console for WebSocket errors
+- Go to System Settings > Privacy & Security > scroll down > click "Open Anyway"
+- On macOS Sequoia 15+, right-click > Open no longer works for unsigned apps
 
-### Local agent won't connect
+### Dashboard shows "Disconnected"
 
-- Confirm `WS_URL` uses `wss://` (not `ws://`)
-- Confirm `ROOM_ID` matches the UUID in your dashboard URL
-- Check that the room token is in the server's `VALID_ROOMS` secret
+- Make sure the agent is running (check your menu bar for the WFA Agent icon)
+- Check that `?room=<uuid>` is in your dashboard URL
+- Try quitting and relaunching the agent from Applications
 
-### "Room ID required" close message
+### Recording doesn't capture events
 
-Your room token is not in the server's `VALID_ROOMS` list. Contact the admin to add it.
+- Check that Accessibility permission is granted (System Settings > Privacy & Security > Accessibility)
+- Quit and reopen the app after granting the permission
+
+### No audio in recording
+
+- Check that Microphone permission is granted
+- The microphone prompt only appears once -- if you denied it, go to System Settings > Privacy & Security > Microphone and enable WFA Agent
+
+### Bridge server is down
+
+Visit `https://wfa-bridge.fly.dev/health` in your browser. It should show `{"status":"ok"}`. If not, contact the admin.
 
 ## Architecture
 
 ```
 Your Mac                         Cloud
 +-----------------+     wss     +-------------------+
-| Electron Agent  | ----------> | Bridge Server     |
-| (local-agent)   |             | (Fly.io, Frankfurt)|
+| WFA Agent       | ----------> | Bridge Server     |
+| (menu bar app)  |             | (Fly.io, Frankfurt)|
 +-----------------+             +-------------------+
                                        ^
                                        | wss
@@ -89,3 +112,7 @@ Your Mac                         Cloud
 ```
 
 Both connections use the same room token. The bridge server routes messages only within a room -- testers cannot see each other's sessions.
+
+## Need Help?
+
+Reply to your setup email or reach out to the team on Slack.

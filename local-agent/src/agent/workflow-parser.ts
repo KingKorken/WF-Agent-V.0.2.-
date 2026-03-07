@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { log, error as logError } from '../utils/logger';
+import { getUserDataPath, ensureDir } from '../utils/app-paths';
 import { initLLMClient, sendMessage, resetConversation } from './llm-client';
 import type { ConversationMessage } from './llm-client';
 import type { WorkflowDefinition } from './workflow-types';
@@ -23,9 +24,8 @@ import type { RecordedEvent } from '../recorder/event-logger';
 // Constants
 // ---------------------------------------------------------------------------
 
-// Compiled JS at local-agent/dist/src/agent/workflow-parser.js
-// Workflows dir at local-agent/workflows/
-const WORKFLOWS_DIR = path.join(__dirname, '../../../workflows');
+// Workflows stored in user data dir — works in both dev and packaged app
+const WORKFLOWS_DIR = getUserDataPath('workflows');
 
 // ---------------------------------------------------------------------------
 // Main export

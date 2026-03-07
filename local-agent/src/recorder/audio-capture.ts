@@ -7,13 +7,12 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
-import * as path from 'path';
 import * as fs from 'fs';
 import { log, error as logError } from '../utils/logger';
+import { getBinPath } from '../utils/app-paths';
 
-// Compiled JS: local-agent/dist/src/recorder/audio-capture.js
-// Binary:      local-agent/bin/audio-recorder-darwin
-const BINARY_PATH = path.join(__dirname, '../../../bin/audio-recorder-darwin');
+// Binary path resolved via centralized AppPaths — works in both dev and packaged app
+const BINARY_PATH = getBinPath('audio-recorder-darwin');
 
 export class AudioCapture {
   private proc: ChildProcess | null = null;

@@ -24,10 +24,10 @@ import { buildManifest } from './manifest-builder';
 // Constants
 // ---------------------------------------------------------------------------
 
-// Compiled JS lives at local-agent/dist/src/recorder/session-manager.js
-// Recordings go at local-agent/recordings/ (gitignored)
-// __dirname = local-agent/dist/src/recorder  → ../../.. = local-agent/
-const RECORDINGS_DIR = path.join(__dirname, '../../../recordings');
+import { getUserDataPath } from '../utils/app-paths';
+
+// Recordings stored in user data dir — works in both dev and packaged app
+const RECORDINGS_DIR = getUserDataPath('recordings');
 
 // ---------------------------------------------------------------------------
 // Types

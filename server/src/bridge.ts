@@ -13,6 +13,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import Anthropic from '@anthropic-ai/sdk';
+import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as http from 'http';
@@ -29,8 +30,12 @@ import {
   ServerAgentProgress,
   ServerAgentStatus,
   ServerWorkflowProgress,
+  ServerRequestWorkflow,
+  AgentWorkflowData,
   WebSocketMessage,
+  WorkflowDefinition,
 } from '@workflow-agent/shared';
+import { formatWorkflowAsGoal } from './workflow-formatter';
 
 // Load .env from repo root
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
@@ -74,8 +79,8 @@ interface AgentLoopResult {
 
 // Agent loop imports (from local-agent package)
 // Loaded dynamically at runtime from local-agent/dist/ to avoid cross-package TS issues.
+// Note: formatWorkflowAsGoal is now imported from ./workflow-formatter (local to server package).
 let runAgentLoop: ((config: AgentLoopConfig) => Promise<AgentLoopResult>) | null = null;
-let formatWorkflowAsGoal: ((workflow: unknown) => string) | null = null;
 
 async function loadAgentModules(): Promise<boolean> {
   const basePath = process.env.AGENT_MODULES_PATH || path.join(__dirname, '../../local-agent/dist');
@@ -83,9 +88,6 @@ async function loadAgentModules(): Promise<boolean> {
   try {
     const agentLoopModule = require(path.join(basePath, 'src/agent/agent-loop'));
     runAgentLoop = agentLoopModule.runAgentLoop;
-
-    const workflowModule = require(path.join(basePath, 'src/agent/workflow-executor'));
-    formatWorkflowAsGoal = workflowModule.formatWorkflowAsGoal;
 
     log('Agent loop modules loaded successfully');
     return true;
@@ -124,6 +126,7 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'agent_recording_started', 'agent_recording_stopped', 'agent_recording_parsing',
   'agent_workflow_parsed', 'agent_workflow_list', 'agent_workflow_detail',
   'agent_workflow_deleted', 'agent_recording_error',
+  'server_request_workflow', 'agent_workflow_data',
 ]);
 
 function parseMessage(raw: string): WebSocketMessage | null {
@@ -152,6 +155,13 @@ interface PendingCommand {
   timeoutId: ReturnType<typeof setTimeout>;
 }
 
+/** Typed pending request for workflow fetch (P1 fix: no implicit any) */
+interface PendingWorkflowRequest {
+  resolve: (value: WorkflowDefinition | null) => void;
+  reject: (reason: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
 interface AgentInfo {
   name: string;
   version: string;
@@ -167,6 +177,7 @@ class Room {
   private _agentLoopActive = false;
   private _commandCounter = 0;
   private readonly _pendingCommands = new Map<string, PendingCommand>();
+  private readonly _pendingWorkflowRequests = new Map<string, PendingWorkflowRequest>();
   private readonly _chatHistories = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
 
   constructor(id: string) {
@@ -244,6 +255,12 @@ class Room {
       pending.reject(new Error(reason));
     }
     this._pendingCommands.clear();
+
+    for (const [id, pending] of this._pendingWorkflowRequests) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(new Error(reason));
+    }
+    this._pendingWorkflowRequests.clear();
   }
 
   sendCommandAndWait(command: AgentCommand, timeoutMs = 30000): Promise<AgentResult> {
@@ -280,6 +297,61 @@ class Room {
     const pending = this._pendingCommands.get(result.id);
     if (pending) {
       pending.resolve(result);
+    }
+  }
+
+  /**
+   * Request a workflow definition from the connected agent.
+   * Uses requestId correlation with timeout for reliable request-response.
+   */
+  requestWorkflowFromAgent(workflowId: string, timeoutMs = 10000): Promise<WorkflowDefinition | null> {
+    return new Promise((resolve, reject) => {
+      const requestId = crypto.randomUUID();
+
+      const timeoutId = setTimeout(() => {
+        this._pendingWorkflowRequests.delete(requestId);
+        resolve(null); // Timeout → fall back to text-based goal
+      }, timeoutMs);
+
+      this._pendingWorkflowRequests.set(requestId, {
+        resolve: (value: WorkflowDefinition | null) => {
+          clearTimeout(timeoutId);
+          this._pendingWorkflowRequests.delete(requestId);
+          resolve(value);
+        },
+        reject: (err: Error) => {
+          clearTimeout(timeoutId);
+          this._pendingWorkflowRequests.delete(requestId);
+          reject(err);
+        },
+        timeoutId,
+      });
+
+      const request: ServerRequestWorkflow = {
+        type: 'server_request_workflow',
+        requestId,
+        workflowId,
+      };
+
+      const sent = this.sendToAgent(request as unknown as Record<string, unknown>);
+      if (!sent) {
+        clearTimeout(timeoutId);
+        this._pendingWorkflowRequests.delete(requestId);
+        resolve(null); // Agent not connected → fall back
+      }
+    });
+  }
+
+  /**
+   * Handle an agent_workflow_data response, resolving the matching pending request.
+   */
+  handleWorkflowDataResponse(msg: AgentWorkflowData): void {
+    const pending = this._pendingWorkflowRequests.get(msg.requestId);
+    if (!pending) return; // Already timed out or duplicate
+    if (msg.found) {
+      pending.resolve(msg.workflow);
+    } else {
+      pending.resolve(null);
     }
   }
 }
@@ -589,7 +661,25 @@ async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise
   room.agentLoopActive = true;
   logRoom(room.id, `Running workflow: ${workflowName} (${workflowId})`);
 
-  const goal = `Execute the workflow "${workflowName}". Follow standard operating procedures for this type of task.`;
+  // Request structured workflow definition from the agent
+  let goal: string;
+  try {
+    logRoom(room.id, `Requesting workflow data from agent: ${workflowId}`);
+    const workflow = await room.requestWorkflowFromAgent(workflowId);
+
+    if (workflow) {
+      goal = formatWorkflowAsGoal(workflow);
+      logRoom(room.id, `Using structured goal (${workflow.steps.length} steps, ${workflow.applications.length} apps)`);
+    } else {
+      // Fallback: agent didn't return workflow data (timeout, not found, or agent disconnected)
+      goal = `Execute the workflow "${workflowName}". Follow standard operating procedures for this type of task.`;
+      logRoom(room.id, `Workflow data unavailable — using text-based goal`);
+    }
+  } catch (err) {
+    // Agent disconnected during request — use fallback
+    goal = `Execute the workflow "${workflowName}". Follow standard operating procedures for this type of task.`;
+    logRoom(room.id, `Workflow fetch error: ${err instanceof Error ? err.message : String(err)} — using text-based goal`);
+  }
 
   try {
     const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '10', 10);
@@ -883,6 +973,15 @@ async function main(): Promise<void> {
                 error: 'Agent is not connected.',
               } as WebSocketMessage);
             }
+          }
+          break;
+        }
+
+        // ----- Agent workflow data response (for structured workflow execution) -----
+        case 'agent_workflow_data': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            room.handleWorkflowDataResponse(msg as AgentWorkflowData);
           }
           break;
         }

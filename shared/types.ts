@@ -575,7 +575,7 @@ export interface AgentWorkflowList {
 /** Full workflow definition (response to get_workflow) */
 export interface AgentWorkflowDetail {
   type: 'agent_workflow_detail';
-  workflow: Record<string, unknown>;
+  workflow: WorkflowDefinition;
 }
 
 /** Workflow deleted from local agent */
@@ -590,6 +590,36 @@ export interface AgentRecordingError {
   error: string;
 }
 
+// ---------------------------------------------------------------------------
+// Server ↔ Agent: Workflow fetch protocol (structured workflow execution)
+// ---------------------------------------------------------------------------
+
+/** Server requests a workflow definition from the agent */
+export interface ServerRequestWorkflow {
+  type: 'server_request_workflow';
+  /** Correlation ID — agent echoes this back in the response */
+  requestId: string;
+  /** Which workflow to fetch */
+  workflowId: string;
+}
+
+/** Agent responds with workflow data (discriminated union for found/not-found) */
+export type AgentWorkflowData =
+  | {
+      type: 'agent_workflow_data';
+      requestId: string;
+      workflowId: string;
+      found: true;
+      workflow: WorkflowDefinition;
+    }
+  | {
+      type: 'agent_workflow_data';
+      requestId: string;
+      workflowId: string;
+      found: false;
+      error?: string;
+    };
+
 /** Any message that can be sent over the WebSocket */
 export type WebSocketMessage =
   | AgentCommand | AgentResult | AgentHello
@@ -602,7 +632,65 @@ export type WebSocketMessage =
   | AgentRecordingStarted | AgentRecordingStopped
   | AgentRecordingParsing | AgentWorkflowParsed
   | AgentWorkflowList | AgentWorkflowDetail
-  | AgentWorkflowDeleted | AgentRecordingError;
+  | AgentWorkflowDeleted | AgentRecordingError
+  | ServerRequestWorkflow | AgentWorkflowData;
+
+// ---------------------------------------------------------------------------
+// Workflow Definition — structured, reusable workflows (moved from local-agent)
+// ---------------------------------------------------------------------------
+
+/** A structured workflow generated from a recording */
+export interface WorkflowDefinition {
+  id: string;
+  name: string;
+  description: string;
+  createdFrom: string;
+  createdAt: string;
+  applications: ApplicationMapping[];
+  variables: WorkflowVariable[];
+  steps: WorkflowStep[];
+  loops?: LoopDefinition;
+  rules?: BusinessRule[];
+}
+
+export interface ApplicationMapping {
+  name: string;
+  type: 'desktop' | 'browser' | 'system';
+  preferredLayer: 'skill' | 'shell' | 'cdp' | 'accessibility' | 'vision';
+  url?: string;
+}
+
+export interface WorkflowVariable {
+  name: string;
+  description: string;
+  source: string;
+  type: 'string' | 'number' | 'date' | 'boolean';
+}
+
+export interface WorkflowStep {
+  id: number;
+  description: string;
+  application: string;
+  layer: 'skill' | 'shell' | 'cdp' | 'accessibility' | 'vision';
+  action: string;
+  params: Record<string, unknown>;
+  output?: string;
+  verification?: string;
+  fallbackLayer?: string;
+}
+
+export interface LoopDefinition {
+  over: string;
+  source: string;
+  variable: string;
+  stepsInLoop: number[];
+}
+
+export interface BusinessRule {
+  condition: string;
+  action: string;
+  source: string;
+}
 
 // ---------------------------------------------------------------------------
 // Shell executor result (used internally by the Local Agent)

@@ -1,41 +1,37 @@
-# --------------------------------------------------------------------------
-# Fly.io — Bridge Server deployment
-# --------------------------------------------------------------------------
-# IMPORTANT: Set VALID_ROOMS and ANTHROPIC_API_KEY via fly secrets:
-#   fly secrets set VALID_ROOMS="uuid1,uuid2,uuid3,uuid4,uuid5"
-#   fly secrets set ANTHROPIC_API_KEY="sk-ant-..."
-# Do NOT put secrets in [env] below.
-# --------------------------------------------------------------------------
+# fly.toml app configuration file generated for wfa-bridge on 2026-03-07T16:10:39+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "wfa-bridge"
-primary_region = "fra"
+app = 'wfa-bridge'
+primary_region = 'fra'
 
 [build]
 
 [env]
-  PORT = "8765"
-  NODE_ENV = "production"
-  AGENT_MODULES_PATH = "/nonexistent"
+  AGENT_MODULES_PATH = '/nonexistent'
+  NODE_ENV = 'production'
+  PORT = '8765'
 
 [http_service]
   internal_port = 8765
   force_https = true
-  auto_stop_machines = "off"
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
   [http_service.concurrency]
-    type = "connections"
+    type = 'connections'
     hard_limit = 50
     soft_limit = 25
 
-[[http_service.checks]]
-  grace_period = "10s"
-  interval = "30s"
-  method = "GET"
-  path = "/health"
-  timeout = "5s"
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
+  size = 'shared-cpu-1x'
+  memory = '256mb'

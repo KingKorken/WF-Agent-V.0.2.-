@@ -12,12 +12,15 @@ import {
   DashboardListWorkflows,
   DashboardGetWorkflow,
   DashboardDeleteWorkflow,
+  ServerRequestWorkflow,
   AgentRecordingStarted,
   AgentRecordingStopped,
   AgentRecordingParsing,
   AgentWorkflowParsed,
+  AgentWorkflowData,
   AgentRecordingError,
   WorkflowSummary,
+  WorkflowDefinition,
 } from '@workflow-agent/shared';
 import { startSession, stopSession, getStatus } from '../recorder/session-manager';
 import { listWorkflows, getWorkflow, deleteWorkflow } from '../workflows/workflow-manager';
@@ -78,6 +81,10 @@ export async function handleDashboardMessage(
 
     case 'dashboard_delete_workflow':
       handleDeleteWorkflow(parsed as unknown as DashboardDeleteWorkflow, send);
+      return true;
+
+    case 'server_request_workflow':
+      handleWorkflowRequest(parsed as unknown as ServerRequestWorkflow, send);
       return true;
 
     default:
@@ -292,4 +299,37 @@ function handleDeleteWorkflow(msg: DashboardDeleteWorkflow, send: SendFn): void 
     type: 'agent_workflow_deleted',
     workflowId: msg.workflowId,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Workflow fetch handler (server requests workflow definition for execution)
+// ---------------------------------------------------------------------------
+
+function handleWorkflowRequest(msg: ServerRequestWorkflow, send: SendFn): void {
+  const { requestId, workflowId } = msg;
+  log(`[dashboard-msg] Workflow data requested: ${workflowId} (requestId: ${requestId.slice(0, 8)})`);
+
+  const workflow = getWorkflow(workflowId);
+
+  if (workflow) {
+    const response: AgentWorkflowData = {
+      type: 'agent_workflow_data',
+      requestId,
+      workflowId,
+      found: true,
+      workflow: workflow as unknown as WorkflowDefinition,
+    };
+    send(JSON.stringify(response));
+    log(`[dashboard-msg] Sent workflow data: ${workflowId}`);
+  } else {
+    const response: AgentWorkflowData = {
+      type: 'agent_workflow_data',
+      requestId,
+      workflowId,
+      found: false,
+      error: `Workflow not found: ${workflowId}`,
+    };
+    send(JSON.stringify(response));
+    log(`[dashboard-msg] Workflow not found: ${workflowId}`);
+  }
 }

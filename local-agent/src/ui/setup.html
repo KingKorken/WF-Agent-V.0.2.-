@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WFA Agent Setup</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #E0E0E0;
+      color: #0A0A0A;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+      -webkit-app-region: drag;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 400px;
+      -webkit-app-region: no-drag;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    p {
+      font-size: 14px;
+      line-height: 1.5;
+      margin-bottom: 24px;
+      opacity: 0.7;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #c0c0c0;
+      border-radius: 4px;
+      font-size: 14px;
+      font-family: 'SF Mono', 'Menlo', monospace;
+      background: #fff;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input[type="text"]:focus {
+      border-color: #0A0A0A;
+    }
+
+    input[type="text"].error {
+      border-color: #d32f2f;
+    }
+
+    .error-message {
+      font-size: 12px;
+      color: #d32f2f;
+      margin-top: 6px;
+      min-height: 18px;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      margin-top: 16px;
+    }
+
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-primary {
+      background: #0A0A0A;
+      color: #E0E0E0;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: #0A0A0A;
+      border: 1px solid #c0c0c0;
+      margin-top: 8px;
+    }
+
+    /* Permissions section */
+    .permissions {
+      margin-top: 24px;
+      display: none;
+    }
+
+    .permissions.visible { display: block; }
+
+    .permission-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #d0d0d0;
+    }
+
+    .permission-row:last-child { border-bottom: none; }
+
+    .permission-name {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .permission-status {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 500;
+    }
+
+    .permission-status.granted {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    .permission-status.missing {
+      background: #fce4ec;
+      color: #c62828;
+      cursor: pointer;
+    }
+
+    .permission-status.missing:hover {
+      opacity: 0.8;
+    }
+
+    .restart-notice {
+      font-size: 12px;
+      background: #fff3e0;
+      padding: 10px 12px;
+      border-radius: 4px;
+      margin-top: 16px;
+      line-height: 1.4;
+    }
+
+    .status-text {
+      font-size: 13px;
+      text-align: center;
+      margin-top: 12px;
+      min-height: 20px;
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Step 1: Room Token -->
+    <div id="step-token">
+      <h1>WFA Agent</h1>
+      <p>Paste the room token from your setup email to connect this agent to your dashboard.</p>
+
+      <label for="token-input">Room Token</label>
+      <input type="text" id="token-input" placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx" spellcheck="false" autocomplete="off">
+      <div class="error-message" id="token-error"></div>
+
+      <button class="btn-primary" id="connect-btn" onclick="handleConnect()">Connect</button>
+      <div class="status-text" id="status-text"></div>
+    </div>
+
+    <!-- Step 2: Permissions -->
+    <div id="step-permissions" class="permissions">
+      <div class="section-title">macOS Permissions</div>
+      <p>WFA needs these permissions to record and replay workflows.</p>
+
+      <div class="permission-row">
+        <span class="permission-name">Accessibility</span>
+        <span class="permission-status" id="perm-accessibility" onclick="openPermission('accessibility')">Checking...</span>
+      </div>
+      <div class="permission-row">
+        <span class="permission-name">Screen Recording</span>
+        <span class="permission-status" id="perm-screen" onclick="openPermission('screen')">Checking...</span>
+      </div>
+      <div class="permission-row">
+        <span class="permission-name">Microphone</span>
+        <span class="permission-status" id="perm-microphone" onclick="openPermission('microphone')">Checking...</span>
+      </div>
+
+      <div class="restart-notice">
+        After granting Accessibility or Screen Recording, you must restart the app for changes to take effect.
+      </div>
+
+      <button class="btn-secondary" onclick="refreshPermissions()">Refresh Permissions</button>
+      <button class="btn-primary" id="done-btn" onclick="handleDone()">Done</button>
+    </div>
+  </div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    const tokenInput = document.getElementById('token-input');
+    const tokenError = document.getElementById('token-error');
+    const connectBtn = document.getElementById('connect-btn');
+    const statusText = document.getElementById('status-text');
+    const stepToken = document.getElementById('step-token');
+    const stepPermissions = document.getElementById('step-permissions');
+
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    function handleConnect() {
+      const token = tokenInput.value.trim();
+      tokenError.textContent = '';
+      tokenInput.classList.remove('error');
+
+      if (!UUID_RE.test(token)) {
+        tokenError.textContent = 'Please enter a valid room token (UUID format).';
+        tokenInput.classList.add('error');
+        return;
+      }
+
+      connectBtn.disabled = true;
+      statusText.textContent = 'Connecting...';
+      ipcRenderer.send('setup:connect', token);
+    }
+
+    ipcRenderer.on('setup:connect-result', (event, result) => {
+      connectBtn.disabled = false;
+      if (result.success) {
+        statusText.textContent = 'Connected.';
+        // Show permissions step
+        stepToken.style.display = 'none';
+        stepPermissions.classList.add('visible');
+        refreshPermissions();
+      } else {
+        statusText.textContent = '';
+        tokenError.textContent = result.error || 'Connection failed. Check your token and try again.';
+        tokenInput.classList.add('error');
+      }
+    });
+
+    function refreshPermissions() {
+      ipcRenderer.send('setup:check-permissions');
+    }
+
+    ipcRenderer.on('setup:permissions-result', (event, perms) => {
+      setPermStatus('perm-accessibility', perms.accessibility);
+      setPermStatus('perm-screen', perms.screenRecording);
+      setPermStatus('perm-microphone', perms.microphone);
+    });
+
+    function setPermStatus(id, granted) {
+      const el = document.getElementById(id);
+      el.textContent = granted ? 'Granted' : 'Grant';
+      el.className = 'permission-status ' + (granted ? 'granted' : 'missing');
+    }
+
+    function openPermission(type) {
+      ipcRenderer.send('setup:open-permission', type);
+    }
+
+    function handleDone() {
+      ipcRenderer.send('setup:done');
+    }
+
+    // Enter key submits
+    tokenInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') handleConnect();
+    });
+  </script>
+</body>
+</html>
