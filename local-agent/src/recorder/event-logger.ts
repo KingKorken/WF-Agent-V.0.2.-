@@ -15,8 +15,8 @@
 
 import { EventEmitter } from 'events';
 import { spawn, ChildProcess } from 'child_process';
-import * as path from 'path';
 import { log, error as logError } from '../utils/logger';
+import { getBinPath } from '../utils/app-paths';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -93,10 +93,8 @@ export type RecordedEvent =
 // Binary path
 // ---------------------------------------------------------------------------
 
-// Compiled JS lives at local-agent/dist/src/recorder/event-logger.js
-// Binary lives at  local-agent/bin/event-monitor-darwin
-// Three levels up from dist/src/recorder → local-agent/
-const BINARY_PATH = path.join(__dirname, '../../../bin/event-monitor-darwin');
+// Binary path resolved via centralized AppPaths — works in both dev and packaged app
+const BINARY_PATH = getBinPath('event-monitor-darwin');
 
 const KEYSTROKE_COALESCE_MS = 500;
 const SCROLL_TRIGGER_THRESHOLD = 500; // px cumulative

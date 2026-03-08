@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "build": "npm run build --workspace=@workflow-agent/shared && tsc",
-    "dev": "npm run build --workspace=@workflow-agent/shared && tsc && node dist/bridge.js"
+    "dev": "npm run build --workspace=@workflow-agent/shared && tsc && node dist/bridge.js",
+    "start": "node dist/bridge.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

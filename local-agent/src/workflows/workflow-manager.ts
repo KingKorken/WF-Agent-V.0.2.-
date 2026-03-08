@@ -9,10 +9,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkflowSummary } from '@workflow-agent/shared';
 import { log, warn } from '../utils/logger';
+import { getUserDataPath, ensureDir } from '../utils/app-paths';
 
-// Compiled JS at local-agent/dist/src/workflows/workflow-manager.js
-// Workflows dir at local-agent/workflows/
-const WORKFLOWS_DIR = path.join(__dirname, '../../../workflows');
+// Workflows stored in user data dir — works in both dev and packaged app
+const WORKFLOWS_DIR = getUserDataPath('workflows');
 
 /**
  * List all workflows, returning a WorkflowSummary for each valid JSON file.

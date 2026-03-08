@@ -1,8 +1,8 @@
 /**
  * Message Router — Routes incoming WebSocket messages to Zustand stores.
  *
- * Handles the server → dashboard direction only. Outgoing messages
- * (dashboard → server) are sent directly by stores via wsService.send()
+ * Handles the server -> dashboard direction only. Outgoing messages
+ * (dashboard -> server) are sent directly by stores via wsService.send()
  * to avoid circular dependencies.
  */
 
@@ -23,9 +23,10 @@ import { wsService } from './websocket';
 import { useChatStore } from '../stores/chatStore';
 import { useConnectionStore } from '../stores/connectionStore';
 import { useWorkflowStore } from '../stores/workflowStore';
+import { getRoomId } from '../config/room';
 
 // ---------------------------------------------------------------------------
-// Incoming message routing (server → dashboard stores)
+// Incoming message routing (server -> dashboard stores)
 // ---------------------------------------------------------------------------
 
 function handleMessage(message: WebSocketMessage): void {
@@ -149,21 +150,30 @@ export function initMessageRouter(): void {
   if (initialized) return;
   initialized = true;
 
+  // Store the room ID so the rest of the app can access it
+  const roomId = getRoomId();
+  useConnectionStore.getState().setRoomId(roomId);
+
   // Subscribe to incoming messages
   wsService.onMessage(handleMessage);
 
   // Connect to the bridge server
   wsService.connect();
 
-  // Send dashboard hello once connected
-  useConnectionStore.subscribe((state) => {
-    if (state.status === 'connected') {
+  // Send dashboard hello once connected (including on reconnection)
+  useConnectionStore.subscribe((state, prevState) => {
+    if (state.status === 'connected' && prevState.status !== 'connected') {
       const hello: DashboardHello = {
         type: 'dashboard_hello',
         dashboardId: `dashboard_${Date.now()}`,
         version: '0.1.0',
+        roomId: roomId ?? undefined,
       };
       wsService.send(hello as unknown as Record<string, unknown>);
+
+      // Reset recording state on reconnect — we don't know if the agent
+      // is still recording after a WS drop
+      useWorkflowStore.getState().setRecordingState('idle');
     }
   });
 }
