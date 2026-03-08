@@ -25,14 +25,15 @@ export function getRoomId(): string | null {
 }
 
 /**
- * True when the dashboard is running on a deployed host AND has no room token.
- * In this case there's no bridge server to connect to (legacy Vercel preview).
+ * True when the dashboard is running on a deployed host AND has no bridge configured.
+ * Returns false for known production hosts (vercel.app, wfa) since those have a bridge.
  */
 export function isCloudPreview(): boolean {
   const host = window.location.hostname;
   const isRemote = host !== 'localhost' && host !== '127.0.0.1' && !host.startsWith('192.168.');
-  // On a remote host, we can connect if VITE_WS_URL is set or a room token exists
   if (!isRemote) return false;
+  // Known production hosts always have a bridge — never show cloud preview
+  if (host.includes('vercel.app') || host.includes('wfa')) return false;
   const hasWsUrl = Boolean(import.meta.env.VITE_WS_URL);
   const hasRoom = Boolean(getRoomId());
   return !hasWsUrl && !hasRoom;

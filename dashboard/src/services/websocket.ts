@@ -112,6 +112,15 @@ class WebSocketService {
   }
 }
 
-// Singleton — URL comes from environment variable or defaults to local
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8765';
+// Singleton — URL comes from environment variable, production default, or local dev
+function resolveWsUrl(): string {
+  // 1. Explicit env var (set via Vercel or .env)
+  if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
+  // 2. Production host → use production bridge
+  const host = window.location.hostname;
+  if (host.includes('vercel.app') || host.includes('wfa')) return 'wss://wfa-bridge.fly.dev';
+  // 3. Local dev
+  return 'ws://localhost:8765';
+}
+const WS_URL = resolveWsUrl();
 export const wsService = new WebSocketService(WS_URL);

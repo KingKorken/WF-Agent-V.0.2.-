@@ -224,7 +224,7 @@ class Room {
     return `cmd_${this.id.slice(0, 8)}_${this._commandCounter}`;
   }
 
-  sendToAgent(message: Record<string, unknown>): boolean {
+  sendToAgent(message: WebSocketMessage): boolean {
     if (!this._agentSocket || this._agentSocket.readyState !== WebSocket.OPEN) {
       return false;
     }
@@ -284,7 +284,7 @@ class Room {
         timeoutId,
       });
 
-      const sent = this.sendToAgent(command as unknown as Record<string, unknown>);
+      const sent = this.sendToAgent(command);
       if (!sent) {
         clearTimeout(timeoutId);
         this._pendingCommands.delete(command.id);
@@ -333,7 +333,7 @@ class Room {
         workflowId,
       };
 
-      const sent = this.sendToAgent(request as unknown as Record<string, unknown>);
+      const sent = this.sendToAgent(request);
       if (!sent) {
         clearTimeout(timeoutId);
         this._pendingWorkflowRequests.delete(requestId);
@@ -967,7 +967,7 @@ async function main(): Promise<void> {
           const room = findRoomBySocket(ws);
           if (room) {
             logRoom(room.id, `Relaying ${msg.type} to agent`);
-            if (!room.sendToAgent(msg as unknown as Record<string, unknown>)) {
+            if (!room.sendToAgent(msg)) {
               room.sendToDashboard({
                 type: 'agent_recording_error',
                 error: 'Agent is not connected.',

@@ -4,9 +4,11 @@
  * Shows on first launch when no room token is saved in config.json.
  * After entering a valid token and checking permissions, the window closes
  * and the agent connects to the bridge server.
+ *
+ * Security: Uses contextIsolation + preload script (no nodeIntegration).
  */
 
-import { BrowserWindow, ipcMain, shell, systemPreferences } from 'electron';
+import { BrowserWindow, ipcMain, IpcMainEvent, shell, systemPreferences } from 'electron';
 import * as path from 'path';
 import WebSocket from 'ws';
 import { log } from '../utils/logger';
@@ -14,8 +16,30 @@ import { saveConfig } from '../utils/config';
 import { startConnection } from '../main';
 import { BRIDGE_URL } from '../build-config';
 
+type IpcHandler = (event: IpcMainEvent, ...args: unknown[]) => void;
+
 let setupWindow: BrowserWindow | null = null;
 let validatedToken: string | null = null;
+
+// IPC handler references for cleanup
+const ipcHandlers = {
+  connect: null as IpcHandler | null,
+  checkPermissions: null as IpcHandler | null,
+  openPermission: null as IpcHandler | null,
+  done: null as IpcHandler | null,
+};
+
+/** Remove all setup IPC handlers */
+function cleanupIpcHandlers(): void {
+  if (ipcHandlers.connect) ipcMain.removeListener('setup:connect', ipcHandlers.connect);
+  if (ipcHandlers.checkPermissions) ipcMain.removeListener('setup:check-permissions', ipcHandlers.checkPermissions);
+  if (ipcHandlers.openPermission) ipcMain.removeListener('setup:open-permission', ipcHandlers.openPermission);
+  if (ipcHandlers.done) ipcMain.removeListener('setup:done', ipcHandlers.done);
+  ipcHandlers.connect = null;
+  ipcHandlers.checkPermissions = null;
+  ipcHandlers.openPermission = null;
+  ipcHandlers.done = null;
+}
 
 /**
  * Show the setup window for room token entry and permissions check.
@@ -36,8 +60,9 @@ export function showSetupWindow(): void {
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#E0E0E0',
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, '../ui/setup-preload.js'),
     },
   });
 
@@ -45,13 +70,16 @@ export function showSetupWindow(): void {
   const htmlPath = path.join(__dirname, '../ui/setup.html');
   setupWindow.loadFile(htmlPath);
 
+  // Clean up IPC handlers AND window reference on close (B2 fix)
   setupWindow.on('closed', () => {
     setupWindow = null;
+    cleanupIpcHandlers();
   });
 
-  // --- IPC Handlers ---
+  // --- IPC Handlers (stored for cleanup) ---
 
-  ipcMain.on('setup:connect', async (_event, token: string) => {
+  ipcHandlers.connect = async (_event: IpcMainEvent, ...args: unknown[]) => {
+    const token = args[0] as string;
     log(`[setup] Validating token: ${token.slice(0, 8)}...`);
     const serverUrl = process.env.WS_URL || BRIDGE_URL;
 
@@ -74,24 +102,23 @@ export function showSetupWindow(): void {
         error: `Connection failed: ${msg}`,
       });
     }
-  });
+  };
 
-  ipcMain.on('setup:check-permissions', () => {
+  ipcHandlers.checkPermissions = (_event: IpcMainEvent) => {
     const perms = checkPermissions();
     setupWindow?.webContents.send('setup:permissions-result', perms);
-  });
+  };
 
-  ipcMain.on('setup:open-permission', (_event, type: string) => {
+  ipcHandlers.openPermission = (_event: IpcMainEvent, ...args: unknown[]) => {
+    const type = args[0] as string;
     switch (type) {
       case 'accessibility':
-        // Open System Settings > Privacy & Security > Accessibility
         shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility');
         break;
       case 'screen':
         shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
         break;
       case 'microphone':
-        // Trigger the native microphone permission prompt
         systemPreferences.askForMediaAccess('microphone').then((granted) => {
           log(`[setup] Microphone permission: ${granted ? 'granted' : 'denied'}`);
           const perms = checkPermissions();
@@ -99,27 +126,24 @@ export function showSetupWindow(): void {
         });
         break;
     }
-  });
+  };
 
-  ipcMain.on('setup:done', () => {
+  ipcHandlers.done = (_event: IpcMainEvent) => {
     if (validatedToken) {
-      // Save config and start connection
       saveConfig({ roomId: validatedToken });
       startConnection(validatedToken);
 
-      // Close setup window
       if (setupWindow) {
         setupWindow.close();
-        setupWindow = null;
+        // closed event handles cleanup
       }
-
-      // Clean up IPC handlers
-      ipcMain.removeAllListeners('setup:connect');
-      ipcMain.removeAllListeners('setup:check-permissions');
-      ipcMain.removeAllListeners('setup:open-permission');
-      ipcMain.removeAllListeners('setup:done');
     }
-  });
+  };
+
+  ipcMain.on('setup:connect', ipcHandlers.connect);
+  ipcMain.on('setup:check-permissions', ipcHandlers.checkPermissions);
+  ipcMain.on('setup:open-permission', ipcHandlers.openPermission);
+  ipcMain.on('setup:done', ipcHandlers.done);
 }
 
 /**
@@ -128,12 +152,17 @@ export function showSetupWindow(): void {
  */
 function validateToken(serverUrl: string, token: string): Promise<boolean> {
   return new Promise((resolve) => {
-    // Convert ws:// to wss:// or vice versa based on URL
-    const ws = new WebSocket(serverUrl);
-    const timeout = setTimeout(() => {
+    let settled = false;
+    function settle(value: boolean) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(outerTimeout);
       ws.close();
-      resolve(false);
-    }, 5000);
+      resolve(value);
+    }
+
+    const ws = new WebSocket(serverUrl);
+    const outerTimeout = setTimeout(() => settle(false), 5000);
 
     ws.on('open', () => {
       // Send hello with room token
@@ -147,26 +176,15 @@ function validateToken(serverUrl: string, token: string): Promise<boolean> {
       }));
 
       // If still connected after 1 second, token was accepted
-      setTimeout(() => {
-        clearTimeout(timeout);
-        ws.close();
-        resolve(true);
-      }, 1000);
+      setTimeout(() => settle(true), 1000);
     });
 
     ws.on('close', (code) => {
-      clearTimeout(timeout);
       // 1008 = Policy Violation (invalid room token)
-      if (code === 1008) {
-        resolve(false);
-      }
-      // Normal close after our test = success (already resolved above)
+      if (code === 1008) settle(false);
     });
 
-    ws.on('error', () => {
-      clearTimeout(timeout);
-      resolve(false);
-    });
+    ws.on('error', () => settle(false));
   });
 }
 

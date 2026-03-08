@@ -210,7 +210,8 @@
   </div>
 
   <script>
-    const { ipcRenderer } = require('electron');
+    // setupAPI is exposed by setup-preload.ts via contextBridge (secure IPC)
+    const api = window.setupAPI;
 
     const tokenInput = document.getElementById('token-input');
     const tokenError = document.getElementById('token-error');
@@ -234,14 +235,13 @@
 
       connectBtn.disabled = true;
       statusText.textContent = 'Connecting...';
-      ipcRenderer.send('setup:connect', token);
+      api.connect(token);
     }
 
-    ipcRenderer.on('setup:connect-result', (event, result) => {
+    api.onConnectResult((result) => {
       connectBtn.disabled = false;
       if (result.success) {
         statusText.textContent = 'Connected.';
-        // Show permissions step
         stepToken.style.display = 'none';
         stepPermissions.classList.add('visible');
         refreshPermissions();
@@ -253,10 +253,10 @@
     });
 
     function refreshPermissions() {
-      ipcRenderer.send('setup:check-permissions');
+      api.checkPermissions();
     }
 
-    ipcRenderer.on('setup:permissions-result', (event, perms) => {
+    api.onPermissionsResult((perms) => {
       setPermStatus('perm-accessibility', perms.accessibility);
       setPermStatus('perm-screen', perms.screenRecording);
       setPermStatus('perm-microphone', perms.microphone);
@@ -269,11 +269,11 @@
     }
 
     function openPermission(type) {
-      ipcRenderer.send('setup:open-permission', type);
+      api.openPermission(type);
     }
 
     function handleDone() {
-      ipcRenderer.send('setup:done');
+      api.done();
     }
 
     // Enter key submits
