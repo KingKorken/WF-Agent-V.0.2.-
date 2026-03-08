@@ -386,11 +386,24 @@ setInterval(() => { globalChatCount = 0; }, 60_000);
 // Origin validation
 // ---------------------------------------------------------------------------
 
-const ALLOWED_ORIGINS = new Set([
+const ALLOWED_ORIGIN_EXACT = new Set([
   'https://wfa-v2.vercel.app',
   'http://localhost:5173',
   'http://localhost:3000',
 ]);
+
+/** Vercel generates unique preview URLs per deployment (e.g. wfa-v2-abc123-user.vercel.app) */
+function isAllowedOrigin(origin: string): boolean {
+  if (ALLOWED_ORIGIN_EXACT.has(origin)) return true;
+  try {
+    const url = new URL(origin);
+    // Allow any *.vercel.app subdomain (covers preview + production deployments)
+    if (url.hostname.endsWith('.vercel.app')) return true;
+  } catch {
+    // Malformed origin — reject
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Simple Claude Chat
@@ -799,7 +812,7 @@ async function main(): Promise<void> {
   // Origin validation on HTTP upgrade
   httpServer.on('upgrade', (request, socket, head) => {
     const origin = request.headers.origin;
-    if (origin && !ALLOWED_ORIGINS.has(origin)) {
+    if (origin && !isAllowedOrigin(origin)) {
       log(`Rejected connection from origin: ${origin}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
