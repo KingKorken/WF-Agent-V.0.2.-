@@ -100,8 +100,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         agentProgress: null,
       }));
 
-      // On deployed environments, respond locally — no bridge server available
-      if (wsService.deployed) {
+      // On deployed environments with no bridge, respond locally
+      if (wsService.cloudPreview) {
         const systemReply: ChatMessage = {
           id: generateId(),
           role: 'system',
