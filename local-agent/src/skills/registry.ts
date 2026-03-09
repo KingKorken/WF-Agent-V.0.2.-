@@ -21,16 +21,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { DiscoveryResult } from './discovery';
+import type { SkillCommand } from '@workflow-agent/shared';
+
+// Re-export so existing consumers keep working
+export type { SkillCommand };
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-export interface SkillCommand {
-  name: string;
-  args: string;
-  description: string;
-}
 
 export interface SkillEntry {
   app: string;

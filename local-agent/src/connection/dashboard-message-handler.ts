@@ -21,10 +21,13 @@ import {
   AgentRecordingError,
   WorkflowSummary,
   WorkflowDefinition,
+  ServerSkillBroadcast,
+  ServerSkillListResult,
 } from '@workflow-agent/shared';
 import { startSession, stopSession, getStatus } from '../recorder/session-manager';
 import { listWorkflows, getWorkflow, deleteWorkflow } from '../workflows/workflow-manager';
 import { parseRecordingToWorkflow } from '../agent/workflow-parser';
+import { handleSkillBroadcast, handleSkillListResult } from '../skills/skill-sharing';
 import { log, error as logError } from '../utils/logger';
 
 /** Maximum recording duration: 30 minutes */
@@ -85,6 +88,14 @@ export async function handleDashboardMessage(
 
     case 'server_request_workflow':
       handleWorkflowRequest(parsed as unknown as ServerRequestWorkflow, send);
+      return true;
+
+    case 'server_skill_broadcast':
+      handleSkillBroadcast(parsed as unknown as ServerSkillBroadcast);
+      return true;
+
+    case 'server_skill_list_result':
+      handleSkillListResult(parsed as unknown as ServerSkillListResult);
       return true;
 
     default:

@@ -620,6 +620,72 @@ export type AgentWorkflowData =
       error?: string;
     };
 
+// ---------------------------------------------------------------------------
+// Skill types (used by local registry and shared skill base)
+// ---------------------------------------------------------------------------
+
+/** A single command that a skill exposes */
+export interface SkillCommand {
+  name: string;
+  args: string;
+  description: string;
+}
+
+// ---------------------------------------------------------------------------
+// Shared Skill Base — Network Learning (Phase 1)
+// ---------------------------------------------------------------------------
+
+/** A skill stored in the central shared skill base */
+export interface SharedSkillEntry {
+  /** Unique ID for this shared skill (uuid) */
+  id: string;
+  /** Application name this skill targets (e.g. "Google Chrome", "Asana") */
+  app: string;
+  /** Aliases for the application name */
+  aliases: string[];
+  /** Filename of the skill script */
+  file: string;
+  /** Runtime used to execute the skill ("node", "python", etc.) */
+  runtime: string;
+  /** Which skills directory the file lives in */
+  skillsDir: 'source' | 'dist';
+  /** Available commands exposed by this skill */
+  commands: SkillCommand[];
+  /** Human-readable notes about the skill */
+  notes: string;
+  /** The compiled JavaScript source code */
+  compiledCode: string;
+  /** The TypeScript source code (for debugging/re-generation) */
+  sourceCode: string;
+  /** ISO timestamp when this skill was uploaded */
+  uploadedAt: string;
+  /** Agent identifier that uploaded the skill */
+  uploadedBy: string;
+}
+
+/** Agent uploads a newly generated skill to the shared skill base */
+export interface AgentSkillUpload {
+  type: 'agent_skill_upload';
+  skill: SharedSkillEntry;
+}
+
+/** Agent requests the full list of shared skills (sent on startup) */
+export interface AgentSkillListRequest {
+  type: 'agent_skill_list_request';
+}
+
+/** Server responds with all shared skills */
+export interface ServerSkillListResult {
+  type: 'server_skill_list_result';
+  skills: SharedSkillEntry[];
+}
+
+/** Server broadcasts a newly uploaded skill to all connected agents */
+export interface ServerSkillBroadcast {
+  type: 'server_skill_broadcast';
+  skill: SharedSkillEntry;
+}
+
 /** Any message that can be sent over the WebSocket */
 export type WebSocketMessage =
   | AgentCommand | AgentResult | AgentHello
@@ -633,7 +699,9 @@ export type WebSocketMessage =
   | AgentRecordingParsing | AgentWorkflowParsed
   | AgentWorkflowList | AgentWorkflowDetail
   | AgentWorkflowDeleted | AgentRecordingError
-  | ServerRequestWorkflow | AgentWorkflowData;
+  | ServerRequestWorkflow | AgentWorkflowData
+  | AgentSkillUpload | AgentSkillListRequest
+  | ServerSkillListResult | ServerSkillBroadcast;
 
 // ---------------------------------------------------------------------------
 // Workflow Definition — structured, reusable workflows (moved from local-agent)

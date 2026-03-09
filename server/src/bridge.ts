@@ -32,10 +32,15 @@ import {
   ServerWorkflowProgress,
   ServerRequestWorkflow,
   AgentWorkflowData,
+  AgentSkillUpload,
+  AgentSkillListRequest,
+  ServerSkillListResult,
+  ServerSkillBroadcast,
   WebSocketMessage,
   WorkflowDefinition,
 } from '@workflow-agent/shared';
 import { formatWorkflowAsGoal } from './workflow-formatter';
+import { loadSkillsFromDisk, uploadSkill, getAllSkills } from './skill-repository';
 
 // Load .env from repo root
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
@@ -127,6 +132,7 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'agent_workflow_parsed', 'agent_workflow_list', 'agent_workflow_detail',
   'agent_workflow_deleted', 'agent_recording_error',
   'server_request_workflow', 'agent_workflow_data',
+  'agent_skill_upload', 'agent_skill_list_request',
 ]);
 
 function parseMessage(raw: string): WebSocketMessage | null {
@@ -237,6 +243,15 @@ class Room {
       return;
     }
     this._dashboardSocket.send(JSON.stringify(message));
+  }
+
+  /** Send a pre-serialized string to the agent (avoids double-stringify for broadcasts) */
+  sendRawToAgent(raw: string): boolean {
+    if (!this._agentSocket || this._agentSocket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    this._agentSocket.send(raw);
+    return true;
   }
 
   broadcastAgentStatus(): void {
@@ -789,6 +804,7 @@ function getOrCreateRoom(roomId: string): Room {
 async function main(): Promise<void> {
   agentModulesLoaded = await loadAgentModules();
   initializeRooms();
+  loadSkillsFromDisk();
 
   const port = Number(process.env.PORT) || DEFAULT_WS_PORT;
 
@@ -1012,6 +1028,43 @@ async function main(): Promise<void> {
           if (room) {
             logRoom(room.id, `Relaying ${msg.type} to dashboard`);
             room.sendToDashboard(msg);
+          }
+          break;
+        }
+
+        // ----- Agent uploads a skill to the shared skill base -----
+        case 'agent_skill_upload': {
+          const upload = msg as AgentSkillUpload;
+          const result = uploadSkill(upload.skill);
+          if (result.ok) {
+            log(`Skill uploaded: ${upload.skill.app} (${upload.skill.id})`);
+            // Broadcast to all OTHER connected agents
+            const broadcast: ServerSkillBroadcast = {
+              type: 'server_skill_broadcast',
+              skill: result.skill,
+            };
+            const serialized = JSON.stringify(broadcast);
+            for (const room of rooms.values()) {
+              if (room.agentSocket !== ws) {
+                room.sendRawToAgent(serialized);
+              }
+            }
+          } else {
+            log(`Skill upload rejected: ${result.error}`);
+          }
+          break;
+        }
+
+        // ----- Agent requests list of all shared skills -----
+        case 'agent_skill_list_request': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            const response: ServerSkillListResult = {
+              type: 'server_skill_list_result',
+              skills: getAllSkills(),
+            };
+            room.sendToAgent(response);
+            logRoom(room.id, `Sent ${response.skills.length} shared skills to agent`);
           }
           break;
         }

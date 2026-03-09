@@ -8,8 +8,13 @@ primary_region = 'fra'
 
 [build]
 
+[mounts]
+  source = 'skill_data'
+  destination = '/data'
+
 [env]
   AGENT_MODULES_PATH = '/nonexistent'
+  DATA_DIR = '/data'
   NODE_ENV = 'production'
   PORT = '8765'
 

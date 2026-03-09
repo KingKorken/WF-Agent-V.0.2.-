@@ -25,6 +25,7 @@ import {
 import { ReconnectManager } from './reconnect';
 import { handleIncomingMessage } from './command-handler';
 import { handleDashboardMessage, onConnectionLost, onConnectionRestored } from './dashboard-message-handler';
+import { initSkillSharing, requestAllSharedSkills } from '../skills/skill-sharing';
 import { log, warn, error as logError } from '../utils/logger';
 
 /** Timestamp prefix for log messages */
@@ -111,6 +112,10 @@ export class WebSocketClient {
         roomId: this.roomId,
       };
       this.send(JSON.stringify(hello));
+
+      // Initialize skill sharing and request all shared skills
+      initSkillSharing((msg: string) => this.send(msg), AGENT_NAME);
+      requestAllSharedSkills();
     });
 
     // --- Message received from server ---

@@ -23,6 +23,7 @@ import type { DiscoveryResult } from './discovery';
 import { registerSkill, SKILLS_DIR, SKILLS_DIST_DIR } from './registry';
 import type { SkillEntry, SkillCommand } from './registry';
 import { saveDiscovery } from './registry';
+import { uploadSkillToShared } from './skill-sharing';
 import {
   buildGenerationSystemPrompt,
   buildGenerationUserPrompt,
@@ -347,6 +348,15 @@ export async function generateSkill(
 
     registerSkill(entry);
     log(`[generator] Skill registered for "${appName}" with ${entry.commands.length} command(s)`);
+
+    // Upload to shared skill base (fire-and-forget)
+    try {
+      const compiledCode = fs.readFileSync(distFile, 'utf-8');
+      const sourceCode = useJavaScript ? compiledCode : code;
+      uploadSkillToShared(entry, sourceCode, compiledCode);
+    } catch (err) {
+      log(`[generator] Shared upload skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     return {
       success: true,
