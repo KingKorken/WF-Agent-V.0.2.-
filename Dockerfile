@@ -19,13 +19,15 @@ COPY dashboard/package.json dashboard/
 # 3. Install ALL dependencies (npm workspaces need the full graph to resolve)
 RUN npm ci --ignore-scripts
 
-# 4. Copy source for shared + server only
+# 4. Copy source for shared + server + local-agent (agent loop orchestration)
 COPY shared/ shared/
 COPY server/ server/
+COPY local-agent/ local-agent/
 COPY tsconfig.json ./
 
-# 5. Build shared first, then server
+# 5. Build shared first, then local-agent, then server
 RUN npm run build --workspace=@workflow-agent/shared && \
+    npm run build --workspace=@workflow-agent/local-agent && \
     npm run build --workspace=@workflow-agent/server
 
 # --------------------------------------------------------------------------
@@ -52,6 +54,7 @@ RUN npm ci --omit=dev --ignore-scripts
 # Copy compiled output from builder
 COPY --from=builder /app/shared/dist shared/dist
 COPY --from=builder /app/server/dist server/dist
+COPY --from=builder /app/local-agent/dist local-agent/dist
 
 # Copy shared package files needed at runtime
 COPY shared/types.ts shared/types.ts
@@ -63,8 +66,8 @@ USER appuser
 # Bridge server port
 EXPOSE 8765
 
-# Agent modules are not available in the container — skip loading
-ENV AGENT_MODULES_PATH=/nonexistent
+# Agent loop modules are now available in the container
+# loadAgentModules() will resolve from the default path: local-agent/dist
 
 # Health check via the /health HTTP endpoint
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \

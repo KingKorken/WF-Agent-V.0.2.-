@@ -36,6 +36,9 @@ import {
   AgentSkillListRequest,
   ServerSkillListResult,
   ServerSkillBroadcast,
+  ServerActionPreview,
+  DashboardActionConfirm,
+  DashboardActionCancel,
   WebSocketMessage,
   WorkflowDefinition,
 } from '@workflow-agent/shared';
@@ -133,6 +136,7 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'agent_workflow_deleted', 'agent_recording_error',
   'server_request_workflow', 'agent_workflow_data',
   'agent_skill_upload', 'agent_skill_list_request',
+  'server_action_preview', 'dashboard_action_confirm', 'dashboard_action_cancel',
 ]);
 
 function parseMessage(raw: string): WebSocketMessage | null {
@@ -175,6 +179,15 @@ interface AgentInfo {
   layers: string[];
 }
 
+interface PendingActionPreview {
+  previewId: string;
+  conversationId: string;
+  originalMessage: string;
+  plan: string;
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  createdAt: number;
+}
+
 class Room {
   readonly id: string;
   private _agentSocket: WebSocket | null = null;
@@ -185,6 +198,7 @@ class Room {
   private readonly _pendingCommands = new Map<string, PendingCommand>();
   private readonly _pendingWorkflowRequests = new Map<string, PendingWorkflowRequest>();
   private readonly _chatHistories = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
+  private _pendingPreview: PendingActionPreview | null = null;
 
   constructor(id: string) {
     this.id = id;
@@ -198,6 +212,8 @@ class Room {
   get agentLoopActive(): boolean { return this._agentLoopActive; }
   set agentLoopActive(val: boolean) { this._agentLoopActive = val; }
   get chatHistories(): Map<string, Array<{ role: 'user' | 'assistant'; content: string }>> { return this._chatHistories; }
+  get pendingPreview(): PendingActionPreview | null { return this._pendingPreview; }
+  set pendingPreview(val: PendingActionPreview | null) { this._pendingPreview = val; }
 
   setAgentSocket(ws: WebSocket | null, info?: AgentInfo): void {
     this._agentSocket = ws;
@@ -437,8 +453,7 @@ Rules you must always follow:
 - Never use emojis. Not a single one.
 - Write in a calm, professional, concise tone. No filler words, no exclamation marks.
 - Keep responses short and direct. Use plain text, not markdown headers or bullet-heavy formatting.
-- You do not have access to the user's screen or computer. You are text-only.
-- If the user asks you to perform a desktop action, explain they need to start a recorded workflow or use a direct command (/shell, /browser, /ax, /vision).
+- If the user asks you to perform a desktop action and you are in conversation mode, let them know they can rephrase their request as a direct instruction (e.g., "Send an email to Tim") and you will handle it.
 - Do not invent information about the user's workflows or data. If you do not know, say so.`;
 
 function getAnthropicClient(): Anthropic | null {
@@ -490,6 +505,83 @@ async function simpleChatWithClaude(room: Room, conversationId: string, userMess
   history.push({ role: 'assistant', content: assistantText });
 
   return assistantText;
+}
+
+// ---------------------------------------------------------------------------
+// Message classification (action vs conversation)
+// ---------------------------------------------------------------------------
+
+interface ClassificationResult {
+  intent: 'action' | 'conversation';
+  plan: string;
+  confidence: number;
+}
+
+const CLASSIFICATION_PROMPT = `You are a message classifier for a workflow automation agent. Your job is to determine whether a user's message is an actionable task request or a conversational message.
+
+ACTIONABLE: The user wants the agent to DO something on their computer — open an app, send an email, schedule a meeting, fill out a form, click buttons, navigate software, etc. These are imperative commands that require the agent to interact with desktop applications.
+
+CONVERSATIONAL: The user is asking a question, making conversation, asking about capabilities, requesting information, or anything that can be answered with text alone.
+
+Rules:
+- Imperative commands ("Send an email to Tim", "Open Outlook", "Schedule a meeting") = action
+- Questions about capabilities ("Can you send emails?", "What can you do?") = conversation
+- Information requests ("What time is it?", "What's on my calendar?") = conversation
+- Ambiguous statements ("I need to send Tim an email") = conversation (low confidence — let user rephrase)
+- Contextual references ("Send that to Tim", "Do it again") = action if context supports it
+
+Respond with ONLY a JSON object, no other text:
+{"intent": "action" | "conversation", "plan": "short description of what the agent will do (only for action intent, empty string for conversation)", "confidence": 0.0-1.0}`;
+
+async function classifyMessage(
+  userMessage: string,
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>,
+  agentConnected: boolean,
+  supportedLayers: string[],
+): Promise<ClassificationResult> {
+  const client = getAnthropicClient();
+  if (!client) {
+    return { intent: 'conversation', plan: '', confidence: 1.0 };
+  }
+
+  // Build context from recent conversation history (last 10 messages)
+  const recentHistory = conversationHistory.slice(-10);
+  const historyContext = recentHistory.length > 0
+    ? `\n\nRecent conversation (for resolving references like "send that to Tim"):\n${recentHistory.map((m) => `${m.role}: ${m.content.slice(0, 200)}`).join('\n')}`
+    : '';
+
+  const agentContext = agentConnected
+    ? `\nThe local agent is connected and supports these layers: ${supportedLayers.join(', ')}.`
+    : '\nThe local agent is NOT connected.';
+
+  const response = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 200,
+    system: CLASSIFICATION_PROMPT,
+    messages: [
+      {
+        role: 'user',
+        content: `${agentContext}${historyContext}\n\nClassify this message: "${userMessage}"`,
+      },
+    ],
+  });
+
+  const text = response.content
+    .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+
+  const parsed = JSON.parse(text) as ClassificationResult;
+
+  // Validate the parsed result
+  if (parsed.intent !== 'action' && parsed.intent !== 'conversation') {
+    return { intent: 'conversation', plan: '', confidence: 1.0 };
+  }
+  if (typeof parsed.confidence !== 'number' || parsed.confidence < 0 || parsed.confidence > 1) {
+    parsed.confidence = 0.5;
+  }
+
+  return parsed;
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +716,7 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
     return;
   }
 
-  // Normal chat — simple text conversation with Claude
+  // Normal chat — classify intent, then route accordingly
   if (!process.env.ANTHROPIC_API_KEY) {
     room.sendToDashboard({
       type: 'server_chat_response',
@@ -636,6 +728,69 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
 
   logRoom(room.id, `Chat: "${content.substring(0, 80)}"`);
 
+  // Classify message intent (action vs conversation)
+  let classification: ClassificationResult | null = null;
+  try {
+    const histories = room.chatHistories;
+    const history = histories.get(conversationId) ?? [];
+    classification = await classifyMessage(
+      content,
+      history,
+      room.isAgentConnected,
+      room.agentInfo?.layers ?? [],
+    );
+    logRoom(room.id, `Classification: intent=${classification.intent}, confidence=${classification.confidence}`);
+  } catch (err) {
+    // Classification failed — fall through to conversation (safe default)
+    logRoom(room.id, `Classification error (falling back to conversation): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Route based on classification
+  if (classification && classification.intent === 'action' && classification.confidence >= 0.7) {
+    // Action intent — check prerequisites, then send preview
+    if (!room.isAgentConnected) {
+      room.sendToDashboard({
+        type: 'server_chat_response',
+        conversationId,
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'Your WF-Agent app needs to be running to perform this task. Please open it and try again.' },
+      });
+      return;
+    }
+
+    if (room.agentLoopActive) {
+      room.sendToDashboard({
+        type: 'server_chat_response',
+        conversationId,
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'A task is already running. Please wait for it to finish.' },
+      });
+      return;
+    }
+
+    const previewId = crypto.randomUUID();
+    const histories = room.chatHistories;
+    const history = histories.get(conversationId) ?? [];
+
+    room.pendingPreview = {
+      previewId,
+      conversationId,
+      originalMessage: content,
+      plan: classification.plan,
+      conversationHistory: [...history],
+      createdAt: Date.now(),
+    };
+
+    const preview: ServerActionPreview = {
+      type: 'server_action_preview',
+      previewId,
+      conversationId,
+      plan: classification.plan,
+      originalMessage: content,
+    };
+    room.sendToDashboard(preview);
+    return;
+  }
+
+  // Conversation intent (or low-confidence classification) — standard chat
   try {
     const reply = await simpleChatWithClaude(room, conversationId, content);
     room.sendToDashboard({
@@ -746,6 +901,147 @@ async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise
   } finally {
     room.agentLoopActive = false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Action confirm/cancel handlers (room-scoped)
+// ---------------------------------------------------------------------------
+
+async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Promise<void> {
+  const { previewId, conversationId } = msg;
+  const pending = room.pendingPreview;
+
+  // Validate previewId matches
+  if (!pending || pending.previewId !== previewId) {
+    room.sendToDashboard({
+      type: 'server_chat_response',
+      conversationId,
+      message: { id: `resp_confirm_${previewId}`, role: 'system', type: 'error', content: 'This action preview has expired or is invalid.' },
+    });
+    return;
+  }
+
+  // Stale confirmation guard — recheck agent connection
+  if (!room.isAgentConnected) {
+    room.pendingPreview = null;
+    room.sendToDashboard({
+      type: 'server_chat_response',
+      conversationId,
+      message: { id: `resp_confirm_${previewId}`, role: 'system', type: 'error', content: 'Your WF-Agent app needs to be running to perform this task. Please open it and try again.' },
+    });
+    return;
+  }
+
+  // Guard against race — another task started between preview and confirm
+  if (room.agentLoopActive) {
+    room.pendingPreview = null;
+    room.sendToDashboard({
+      type: 'server_chat_response',
+      conversationId,
+      message: { id: `resp_confirm_${previewId}`, role: 'system', type: 'error', content: 'A task is already running. Please wait for it to finish.' },
+    });
+    return;
+  }
+
+  if (!agentModulesLoaded || !runAgentLoop) {
+    room.pendingPreview = null;
+    room.sendToDashboard({
+      type: 'server_chat_response',
+      conversationId,
+      message: { id: `resp_confirm_${previewId}`, role: 'system', type: 'error', content: 'Agent loop modules are not available. The server needs to be restarted with agent support.' },
+    });
+    return;
+  }
+
+  // Clear pending preview and start execution
+  const { plan, originalMessage, conversationHistory } = pending;
+  room.pendingPreview = null;
+  room.agentLoopActive = true;
+
+  // Construct goal from plan + original message + conversation context
+  const contextSummary = conversationHistory.length > 0
+    ? `\n\nConversation context:\n${conversationHistory.slice(-5).map((m) => `${m.role}: ${m.content.slice(0, 200)}`).join('\n')}`
+    : '';
+  const goal = `${plan}\n\nOriginal user request: "${originalMessage}"${contextSummary}`;
+
+  logRoom(room.id, `Executing action: ${plan}`);
+
+  try {
+    const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '10', 10);
+    const result = await runAgentLoop({
+      goal,
+      sendAndWait: (cmd) => room.sendCommandAndWait(cmd),
+      maxIterations: maxIter,
+      callbacks: {
+        onStep: (step: number, maxIterations: number) => {
+          // Send progress to chatStore (not workflowStore) via server_agent_progress
+          const progress: ServerAgentProgress = {
+            type: 'server_agent_progress',
+            conversationId,
+            step,
+            maxSteps: maxIterations,
+            thinking: `Step ${step} of ${maxIterations}`,
+          };
+          room.sendToDashboard(progress);
+        },
+        onAction: (command: AgentCommand, thinking: string) => {
+          const progress: ServerAgentProgress = {
+            type: 'server_agent_progress',
+            conversationId,
+            step: 0,
+            maxSteps: 0,
+            thinking: thinking.substring(0, 100),
+            action: command.action,
+            layer: command.layer,
+          };
+          room.sendToDashboard(progress);
+        },
+      },
+    });
+
+    // Send completion summary as a chat message
+    room.sendToDashboard({
+      type: 'server_chat_response',
+      conversationId,
+      message: {
+        id: `resp_complete_${previewId}`,
+        role: 'agent',
+        type: 'text',
+        content: result.summary || 'Task completed.',
+      },
+    });
+  } catch (err) {
+    room.sendToDashboard({
+      type: 'server_chat_response',
+      conversationId,
+      message: {
+        id: `resp_error_${previewId}`,
+        role: 'system',
+        type: 'error',
+        content: `Task failed: ${err instanceof Error ? err.message : String(err)}`,
+      },
+    });
+  } finally {
+    room.agentLoopActive = false;
+  }
+}
+
+function handleActionCancel(room: Room, msg: DashboardActionCancel): void {
+  const { previewId, conversationId } = msg;
+  const pending = room.pendingPreview;
+
+  // Validate previewId matches
+  if (!pending || pending.previewId !== previewId) {
+    return; // Already cancelled or expired — no-op
+  }
+
+  room.pendingPreview = null;
+
+  room.sendToDashboard({
+    type: 'server_chat_response',
+    conversationId,
+    message: { id: `resp_cancel_${previewId}`, role: 'agent', type: 'text', content: 'Cancelled.' },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -983,6 +1279,26 @@ async function main(): Promise<void> {
           const room = findRoomBySocket(ws);
           if (room) {
             logRoom(room.id, `Workflow cancel requested: ${(msg as DashboardWorkflowCancel).workflowId}`);
+          }
+          break;
+        }
+
+        // ----- Dashboard action confirm (smart chat routing) -----
+        case 'dashboard_action_confirm': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            handleActionConfirm(room, msg as DashboardActionConfirm).catch((err) => {
+              logRoom(room.id, `Action confirm error: ${err instanceof Error ? err.message : String(err)}`);
+            });
+          }
+          break;
+        }
+
+        // ----- Dashboard action cancel (smart chat routing) -----
+        case 'dashboard_action_cancel': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            handleActionCancel(room, msg as DashboardActionCancel);
           }
           break;
         }

@@ -13,6 +13,7 @@ import type {
   ServerAgentProgress,
   ServerAgentStatus,
   ServerWorkflowProgress,
+  ServerActionPreview,
   AgentWorkflowParsed,
   AgentRecordingError,
   AgentWorkflowList,
@@ -51,6 +52,19 @@ function handleMessage(message: WebSocketMessage): void {
         thinking: msg.thinking,
         action: msg.action,
         layer: msg.layer,
+      });
+      break;
+    }
+
+    case 'server_action_preview': {
+      const msg = message as ServerActionPreview;
+      useChatStore.getState().receiveMessage(msg.conversationId, {
+        id: `preview_${msg.previewId}`,
+        role: 'agent',
+        type: 'action-preview',
+        content: msg.plan,
+        previewId: msg.previewId,
+        timestamp: new Date(),
       });
       break;
     }

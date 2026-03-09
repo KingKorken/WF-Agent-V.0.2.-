@@ -686,6 +686,41 @@ export interface ServerSkillBroadcast {
   skill: SharedSkillEntry;
 }
 
+// ---------------------------------------------------------------------------
+// Smart Chat Routing — Action preview & confirmation protocol
+// ---------------------------------------------------------------------------
+
+/** Action preview sent from bridge to dashboard for user confirmation */
+export interface ServerActionPreview {
+  type: 'server_action_preview';
+  /** Unique ID for this preview — echoed back in confirm/cancel */
+  previewId: string;
+  /** The conversation this preview belongs to */
+  conversationId: string;
+  /** Human-readable plan shown to the user */
+  plan: string;
+  /** The original user message that triggered this preview */
+  originalMessage: string;
+}
+
+/** User confirms the previewed action */
+export interface DashboardActionConfirm {
+  type: 'dashboard_action_confirm';
+  /** Echoes the previewId from ServerActionPreview */
+  previewId: string;
+  /** The conversation this belongs to */
+  conversationId: string;
+}
+
+/** User cancels the previewed action */
+export interface DashboardActionCancel {
+  type: 'dashboard_action_cancel';
+  /** Echoes the previewId from ServerActionPreview */
+  previewId: string;
+  /** The conversation this belongs to */
+  conversationId: string;
+}
+
 /** Any message that can be sent over the WebSocket */
 export type WebSocketMessage =
   | AgentCommand | AgentResult | AgentHello
@@ -701,7 +736,8 @@ export type WebSocketMessage =
   | AgentWorkflowDeleted | AgentRecordingError
   | ServerRequestWorkflow | AgentWorkflowData
   | AgentSkillUpload | AgentSkillListRequest
-  | ServerSkillListResult | ServerSkillBroadcast;
+  | ServerSkillListResult | ServerSkillBroadcast
+  | ServerActionPreview | DashboardActionConfirm | DashboardActionCancel;
 
 // ---------------------------------------------------------------------------
 // Workflow Definition — structured, reusable workflows (moved from local-agent)

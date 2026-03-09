@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { wsService } from '../services/websocket';
 
 export type MessageRole = 'user' | 'agent' | 'system';
-export type MessageType = 'text' | 'progress-card' | 'data-card' | 'error';
+export type MessageType = 'text' | 'progress-card' | 'data-card' | 'error' | 'action-preview';
 
 export interface ChatMessage {
   id: string;
@@ -10,6 +10,7 @@ export interface ChatMessage {
   type: MessageType;
   content: string;
   suggestion?: string;
+  previewId?: string;
   timestamp: Date;
 }
 
@@ -44,6 +45,8 @@ interface ChatState {
   getDraft: (conversationId: string) => string;
   receiveMessage: (conversationId: string, message: ChatMessage) => void;
   setAgentProgress: (conversationId: string, progress: AgentProgress) => void;
+  confirmAction: (previewId: string, conversationId: string) => void;
+  cancelAction: (previewId: string, conversationId: string) => void;
 }
 
 function generateId(): string {
@@ -174,5 +177,52 @@ export const useChatStore = create<ChatState>((set, get) => {
         agentProgress: progress,
         isAgentTyping: true,
       }),
+
+    confirmAction: (previewId, conversationId) => {
+      wsService.send({
+        type: 'dashboard_action_confirm',
+        previewId,
+        conversationId,
+      });
+      // Update the preview message to disable buttons immediately
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.previewId === previewId
+                    ? { ...m, type: 'text' as const, content: m.content + '\n\nConfirmed — executing...' }
+                    : m
+                ),
+              }
+            : c
+        ),
+        isAgentTyping: true,
+      }));
+    },
+
+    cancelAction: (previewId, conversationId) => {
+      wsService.send({
+        type: 'dashboard_action_cancel',
+        previewId,
+        conversationId,
+      });
+      // Update the preview message to reflect cancellation
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.previewId === previewId
+                    ? { ...m, type: 'text' as const, content: m.content + '\n\nCancelled.' }
+                    : m
+                ),
+              }
+            : c
+        ),
+      }));
+    },
   };
 });

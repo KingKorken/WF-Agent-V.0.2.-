@@ -40,7 +40,7 @@ export function ChatView() {
         {!isEmpty && (
           <div className={styles.messages}>
             {messages.map((msg) => (
-              <ChatMessage key={msg.id} message={msg} />
+              <ChatMessage key={msg.id} message={msg} conversationId={conversation!.id} />
             ))}
             {isAgentTyping && (
               <div className={styles.typingIndicator}>
