@@ -17,8 +17,7 @@ dashboard/dist
 .vscode
 .idea
 
-# Electron / desktop agent (not needed on server)
-local-agent/src
+# Electron / desktop agent — only exclude test files (src needed for agent loop build)
 local-agent/test
 
 # Dashboard source (hosted on Vercel, not in this container)
