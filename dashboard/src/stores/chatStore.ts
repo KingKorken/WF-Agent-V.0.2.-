@@ -62,6 +62,7 @@ interface ChatState {
   setAgentProgress: (conversationId: string, progress: AgentProgress) => void;
   addAgentLogEntry: (entry: AgentLogEntry) => void;
   clearAgentLog: () => void;
+  resetTypingState: () => void;
   confirmAction: (previewId: string, conversationId: string) => void;
   cancelAction: (previewId: string, conversationId: string) => void;
 }
@@ -205,6 +206,9 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     clearAgentLog: () =>
       set({ agentLog: [], agentProgress: null }),
+
+    resetTypingState: () =>
+      set({ isAgentTyping: false, agentProgress: null, agentLog: [] }),
 
     confirmAction: (previewId, conversationId) => {
       wsService.send({

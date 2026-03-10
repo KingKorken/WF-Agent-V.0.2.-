@@ -14,6 +14,7 @@ import type {
   ServerAgentStatus,
   ServerWorkflowProgress,
   ServerActionPreview,
+  ServerDebugLog,
   AgentWorkflowParsed,
   AgentRecordingError,
   AgentWorkflowList,
@@ -24,6 +25,7 @@ import { wsService } from './websocket';
 import { useChatStore } from '../stores/chatStore';
 import { useConnectionStore } from '../stores/connectionStore';
 import { useWorkflowStore } from '../stores/workflowStore';
+import { useDebugStore } from '../stores/debugStore';
 import { getRoomId } from '../config/room';
 
 // ---------------------------------------------------------------------------
@@ -160,6 +162,21 @@ function handleMessage(message: WebSocketMessage): void {
       break;
     }
 
+    // --- Debug logging ---
+
+    case 'server_debug_log': {
+      const msg = message as ServerDebugLog;
+      useDebugStore.getState().addEntry({
+        source: 'server',
+        level: msg.level,
+        category: msg.source,
+        message: msg.message,
+        detail: msg.detail,
+        timestamp: msg.timestamp,
+      });
+      break;
+    }
+
     default:
       break;
   }
@@ -200,6 +217,17 @@ export function initMessageRouter(): void {
       // Reset recording state on reconnect — we don't know if the agent
       // is still recording after a WS drop
       useWorkflowStore.getState().setRecordingState('idle');
+
+      // Reset typing state on reconnect — WS drop may have lost pending responses
+      useChatStore.getState().resetTypingState();
+
+      useDebugStore.getState().addEntry({
+        source: 'client',
+        level: 'info',
+        category: 'reconnect',
+        message: 'Reset typing state after reconnect',
+        timestamp: new Date().toISOString(),
+      });
     }
   });
 }

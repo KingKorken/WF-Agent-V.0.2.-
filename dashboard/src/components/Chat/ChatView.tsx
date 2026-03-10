@@ -1,11 +1,13 @@
 import { useRef, useEffect } from 'react';
 import { useChatStore } from '../../stores/chatStore';
+import { useDebugStore } from '../../stores/debugStore';
 import { ProgressCard } from './ProgressCard';
 import { ChatGreeting } from './ChatGreeting';
 import { ChatSuggestions } from './ChatSuggestions';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { AgentActivityLog } from './AgentActivityLog';
+import { DebugPanel } from '../Debug/DebugPanel';
 import { LoadingDots } from '../shared/LoadingDots';
 import styles from './ChatView.module.css';
 
@@ -19,6 +21,8 @@ export function ChatView() {
   const agentLogLength = useChatStore((s) => s.agentLog.length);
   const suggestionsVisible = useChatStore((s) => s.suggestionsVisible);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const debugToggle = useDebugStore((s) => s.toggle);
+  const debugOpen = useDebugStore((s) => s.isOpen);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const messages = conversation?.messages ?? [];
@@ -60,6 +64,10 @@ export function ChatView() {
           <ChatInput onSend={sendMessage} disabled={isAgentTyping} />
         </div>
       )}
+      <button className={styles.debugToggle} onClick={debugToggle}>
+        {debugOpen ? 'Hide Debug' : 'Debug'}
+      </button>
+      <DebugPanel />
     </div>
   );
 }

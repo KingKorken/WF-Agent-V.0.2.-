@@ -739,6 +739,20 @@ export interface DashboardActionCancel {
   conversationId: string;
 }
 
+// ---------------------------------------------------------------------------
+// Debug logging — pipeline visibility for dashboard + fly logs
+// ---------------------------------------------------------------------------
+
+/** Debug log entry pushed from bridge server to dashboard */
+export interface ServerDebugLog {
+  type: 'server_debug_log';
+  level: 'info' | 'warn' | 'error';
+  source: string;
+  message: string;
+  detail?: string;
+  timestamp: string;
+}
+
 /** Any message that can be sent over the WebSocket */
 export type WebSocketMessage =
   | AgentCommand | AgentResult | AgentHello
@@ -755,7 +769,8 @@ export type WebSocketMessage =
   | ServerRequestWorkflow | AgentWorkflowData
   | AgentSkillUpload | AgentSkillListRequest
   | ServerSkillListResult | ServerSkillBroadcast
-  | ServerActionPreview | DashboardActionConfirm | DashboardActionCancel;
+  | ServerActionPreview | DashboardActionConfirm | DashboardActionCancel
+  | ServerDebugLog;
 
 // ---------------------------------------------------------------------------
 // Workflow Definition — structured, reusable workflows (moved from local-agent)

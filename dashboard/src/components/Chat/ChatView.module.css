@@ -42,3 +42,26 @@
   margin: 0 auto;
   width: 100%;
 }
+
+.debugToggle {
+  position: fixed;
+  bottom: 8px;
+  right: 16px;
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: var(--font-weight-regular);
+  color: var(--color-text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  z-index: 1001;
+  opacity: 0.6;
+  transition: opacity var(--duration-fast) var(--ease-out-quad);
+}
+
+.debugToggle:hover {
+  opacity: 1;
+  color: var(--color-text);
+}

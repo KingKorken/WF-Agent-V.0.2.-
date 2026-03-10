@@ -4,6 +4,29 @@ import { isCloudPreview } from '../config/room';
 
 type MessageHandler = (message: WebSocketMessage) => void;
 
+/** Lazy debug log helper — avoids circular import with debugStore */
+function debugLog(
+  level: 'info' | 'warn' | 'error',
+  category: string,
+  message: string,
+  detail?: string,
+): void {
+  try {
+    // Lazy import to break circular dep (stores import from websocket)
+    const { useDebugStore } = require('../stores/debugStore');
+    useDebugStore.getState().addEntry({
+      source: 'client' as const,
+      level,
+      category,
+      message,
+      detail,
+      timestamp: new Date().toISOString(),
+    });
+  } catch {
+    // debugStore not yet available during init — ignore
+  }
+}
+
 class WebSocketService {
   private ws: WebSocket | null = null;
   private url: string;
@@ -42,11 +65,13 @@ class WebSocketService {
         if (this.disposed) { this.ws?.close(); return; }
         store.setStatus('connected');
         this.reconnectAttempts = 0;
+        debugLog('info', 'websocket', 'Connected', this.url);
       };
 
       this.ws.onmessage = (event) => {
         try {
           const message: WebSocketMessage = JSON.parse(event.data);
+          debugLog('info', 'ws-recv', message.type);
           this.handlers.forEach((handler) => handler(message));
         } catch {
           // Ignore malformed messages
@@ -55,6 +80,7 @@ class WebSocketService {
 
       this.ws.onclose = (event) => {
         if (this.disposed) return;
+        debugLog('warn', 'websocket', 'Disconnected', `code=${event.code} reason=${event.reason || 'none'}`);
         // Use CloseEvent.code to distinguish error vs clean close
         // 1000 = normal, 1001 = going away, 1006 = abnormal (error)
         if (event.code === 1006) {
@@ -68,6 +94,7 @@ class WebSocketService {
       // onerror only logs — onclose handles all status updates
       // (browser fires onerror then onclose, so updating status in both causes flicker)
       this.ws.onerror = () => {
+        debugLog('error', 'websocket', 'WebSocket error');
         console.warn('[ws] WebSocket error — onclose will handle status');
       };
     } catch {
@@ -90,11 +117,13 @@ class WebSocketService {
       1000 * Math.pow(2, this.reconnectAttempts),
       this.maxReconnectDelay,
     );
+    debugLog('info', 'websocket', `Reconnecting in ${delay}ms`, `attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
   }
 
   send(message: Record<string, unknown>): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
+      debugLog('info', 'ws-send', (message.type as string) || 'unknown', (message.conversationId as string) || undefined);
       this.ws.send(JSON.stringify(message));
     }
   }

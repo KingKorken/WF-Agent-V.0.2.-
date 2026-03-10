@@ -39,6 +39,7 @@ import {
   ServerActionPreview,
   DashboardActionConfirm,
   DashboardActionCancel,
+  ServerDebugLog,
   WebSocketMessage,
   WorkflowDefinition,
 } from '@workflow-agent/shared';
@@ -123,6 +124,26 @@ function logRoom(roomId: string, message: string): void {
   console.log(`[${timestamp()}] [room:${roomId.slice(0, 8)}] ${message}`);
 }
 
+/** Send a debug log entry to the dashboard AND to fly logs */
+function sendDebugLog(
+  room: Room,
+  level: ServerDebugLog['level'],
+  source: string,
+  message: string,
+  detail?: string,
+): void {
+  const debugLog: ServerDebugLog = {
+    type: 'server_debug_log',
+    level,
+    source,
+    message,
+    detail,
+    timestamp: new Date().toISOString(),
+  };
+  room.sendToDashboard(debugLog);
+  logRoom(room.id, `[debug:${level}] ${source}: ${message}${detail ? ` | ${detail}` : ''}`);
+}
+
 // ---------------------------------------------------------------------------
 // Message validation (P1 security fix — thin validation at JSON.parse boundary)
 // ---------------------------------------------------------------------------
@@ -138,6 +159,7 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'server_request_workflow', 'agent_workflow_data',
   'agent_skill_upload', 'agent_skill_list_request',
   'server_action_preview', 'dashboard_action_confirm', 'dashboard_action_cancel',
+  'server_debug_log',
 ]);
 
 function parseMessage(raw: string): WebSocketMessage | null {
@@ -687,6 +709,8 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
   }
   globalChatCount++;
 
+  sendDebugLog(room, 'info', 'handleChatMessage', `Received: "${content.substring(0, 60)}"`, isDirect ? 'direct command' : undefined);
+
   // Direct command mode (/shell, /browser, /ax, /vision)
   if (isDirect) {
     if (!room.isAgentConnected) {
@@ -745,6 +769,7 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
   // Classify message intent (action vs conversation)
   let classification: ClassificationResult | null = null;
   try {
+    sendDebugLog(room, 'info', 'classifyMessage', 'Classifying intent...');
     const histories = room.chatHistories;
     const history = histories.get(conversationId) ?? [];
     classification = await classifyMessage(
@@ -753,16 +778,18 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
       room.isAgentConnected,
       room.agentInfo?.layers ?? [],
     );
-    logRoom(room.id, `Classification: intent=${classification.intent}, confidence=${classification.confidence}`);
+    sendDebugLog(room, 'info', 'classifyMessage', `Result: intent=${classification.intent}, confidence=${classification.confidence}`, classification.plan || undefined);
   } catch (err) {
     // Classification failed — fall through to conversation (safe default)
-    logRoom(room.id, `Classification error (falling back to conversation): ${err instanceof Error ? err.message : String(err)}`);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    sendDebugLog(room, 'error', 'classifyMessage', `Failed: ${errMsg}`);
   }
 
   // Route based on classification
   if (classification && classification.intent === 'action' && classification.confidence >= 0.7) {
     // Action intent — check prerequisites, then send preview
     if (!room.isAgentConnected) {
+      sendDebugLog(room, 'warn', 'handleChatMessage', 'Agent not connected, cannot execute action');
       room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
@@ -772,6 +799,7 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
     }
 
     if (room.agentLoopActive) {
+      sendDebugLog(room, 'warn', 'handleChatMessage', 'Agent loop already active');
       room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
@@ -800,6 +828,7 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
       plan: classification.plan,
       originalMessage: content,
     };
+    sendDebugLog(room, 'info', 'handleChatMessage', `Preview card sent: ${previewId}`, classification.plan);
     room.sendToDashboard(preview);
     return;
   }
@@ -807,12 +836,15 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
   // Conversation intent (or low-confidence classification) — standard chat
   try {
     const reply = await simpleChatWithClaude(room, conversationId, content);
+    sendDebugLog(room, 'info', 'handleChatMessage', 'Conversation response sent');
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
       message: { id: `resp_${id}`, role: 'agent', type: 'text', content: reply },
     });
   } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    sendDebugLog(room, 'error', 'handleChatMessage', `Chat error: ${errMsg}`);
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
@@ -944,8 +976,11 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
   const { previewId, conversationId } = msg;
   const pending = room.pendingPreview;
 
+  sendDebugLog(room, 'info', 'handleActionConfirm', `Confirmed: ${previewId}`);
+
   // Validate previewId matches
   if (!pending || pending.previewId !== previewId) {
+    sendDebugLog(room, 'warn', 'handleActionConfirm', 'Preview expired or invalid');
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
@@ -956,6 +991,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
 
   // Stale confirmation guard — recheck agent connection
   if (!room.isAgentConnected) {
+    sendDebugLog(room, 'warn', 'handleActionConfirm', 'Agent disconnected before execution');
     room.pendingPreview = null;
     room.sendToDashboard({
       type: 'server_chat_response',
@@ -997,7 +1033,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
     : '';
   const goal = `${plan}\n\nOriginal user request: "${originalMessage}"${contextSummary}`;
 
-  logRoom(room.id, `Executing action: ${plan}`);
+  sendDebugLog(room, 'info', 'handleActionConfirm', 'Starting agent loop', `Goal: ${plan.substring(0, 100)}`);
 
   // Helper to send progress events to the dashboard
   let currentStep = 0;
@@ -1084,6 +1120,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
     });
 
     // Send completion summary as a chat message
+    sendDebugLog(room, 'info', 'handleActionConfirm', `Agent loop complete: ${result.outcome}`, result.summary?.substring(0, 150));
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
@@ -1096,6 +1133,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
     });
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
+    sendDebugLog(room, 'error', 'handleActionConfirm', `Agent loop failed: ${errorMsg}`);
     sendProgress('error', `Task failed: ${errorMsg}`, 'Unhandled exception in agent loop');
 
     room.sendToDashboard({
