@@ -64,6 +64,7 @@ interface AgentLoopCallbacks {
   onThinking?: () => void;
   onParsed?: (parsed: unknown, step: number) => void;
   onAction?: (command: AgentCommand, thinking: string) => void;
+  onActionResult?: (command: AgentCommand, result: AgentResult) => void;
   onComplete?: (summary: string) => void;
   onNeedsHelp?: (question: string) => void;
   onError?: (error: string, context: string) => void;
@@ -442,14 +443,21 @@ function isAllowedOrigin(origin: string): boolean {
 
 let anthropicClient: Anthropic | null = null;
 
-const CHAT_SYSTEM_PROMPT = `You are the assistant embedded in a B2B workflow automation platform. The platform helps companies automate repetitive tasks across HR, accounting, procurement, and operations.
+const CHAT_SYSTEM_PROMPT = `You are an AI agent embedded in a desktop workflow automation platform. You are NOT just a text assistant — you are a fully capable agent that can control the user's desktop applications (email, browser, calendar, etc.) when given actionable instructions.
+
+The platform helps knowledge workers automate repetitive tasks across HR, accounting, procurement, and operations by controlling desktop applications on the user's Mac.
 
 You help users with:
+- Executing desktop automation tasks (sending emails, scheduling meetings, filling forms, navigating applications)
 - Understanding and managing their automated workflows
 - Answering questions about workflow status, scheduling, and configuration
 - General questions and conversation
 
 Rules you must always follow:
+- You ARE an AI agent, not just an assistant. If asked, confirm you can perform actions on the user's computer.
+- Never say you cannot perform desktop actions, send emails, or interact with applications. You can.
+- Never suggest the user needs to "set up a workflow" or "configure an automation" to perform a simple task. You can do it directly.
+- Never pretend to have completed an action you did not actually perform. If an action was not executed through the agent loop, do not claim it was.
 - Never use emojis. Not a single one.
 - Write in a calm, professional, concise tone. No filler words, no exclamation marks.
 - Keep responses short and direct. Use plain text, not markdown headers or bullet-heavy formatting.
@@ -566,10 +574,16 @@ async function classifyMessage(
     ],
   });
 
-  const text = response.content
+  let text = response.content
     .filter((block): block is Anthropic.TextBlock => block.type === 'text')
     .map((block) => block.text)
-    .join('');
+    .join('')
+    .trim();
+
+  // Strip markdown code fences if Haiku wraps JSON in ```json ... ```
+  if (text.startsWith('```')) {
+    text = text.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '').trim();
+  }
 
   const parsed = JSON.parse(text) as ClassificationResult;
 
@@ -866,22 +880,41 @@ async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise
 
   try {
     const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '10', 10);
+    const commandTimeoutMs = parseInt(process.env.AGENT_COMMAND_TIMEOUT || '60000', 10);
     const result = await runAgentLoop!({
       goal,
-      sendAndWait: (cmd) => room.sendCommandAndWait(cmd),
+      sendAndWait: (cmd) => room.sendCommandAndWait(cmd, commandTimeoutMs),
       maxIterations: maxIter,
       callbacks: {
         onStep: (step: number, maxIterations: number) => {
+          logRoom(room.id, `[workflow] Step ${step}/${maxIterations}`);
           room.sendToDashboard({
             type: 'server_workflow_progress', workflowId,
             step, totalSteps: maxIterations, currentStepName: `Step ${step}`, status: 'running',
           });
         },
+        onObservation: (obs: unknown) => {
+          const observation = obs as Record<string, unknown>;
+          logRoom(room.id, `[workflow] Observing: ${observation.frontmostApp || 'unknown'}`);
+        },
+        onThinking: () => {
+          logRoom(room.id, `[workflow] Sending to Claude...`);
+        },
         onAction: (_command: AgentCommand, thinking: string) => {
+          logRoom(room.id, `[workflow] Executing: ${_command.layer}/${_command.action}`);
           room.sendToDashboard({
             type: 'server_workflow_progress', workflowId,
             step: 0, totalSteps: 0, currentStepName: thinking.substring(0, 100), status: 'running',
           });
+        },
+        onActionResult: (_command: AgentCommand, result: AgentResult) => {
+          logRoom(room.id, `[workflow] Result: ${result.status} for ${_command.layer}/${_command.action}`);
+        },
+        onError: (error: string, context: string) => {
+          logRoom(room.id, `[workflow] Error: ${error} (${context})`);
+        },
+        onComplete: (summary: string) => {
+          logRoom(room.id, `[workflow] Complete: ${summary.substring(0, 100)}`);
         },
       },
     });
@@ -966,35 +999,86 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
 
   logRoom(room.id, `Executing action: ${plan}`);
 
+  // Helper to send progress events to the dashboard
+  let currentStep = 0;
+  let currentMaxSteps = 0;
+  function sendProgress(
+    phase: ServerAgentProgress['phase'],
+    message: string,
+    detail?: string,
+    layer?: AgentCommand['layer'],
+  ): void {
+    const progress: ServerAgentProgress = {
+      type: 'server_agent_progress',
+      conversationId,
+      phase,
+      step: currentStep,
+      maxSteps: currentMaxSteps,
+      message,
+      detail,
+      layer,
+      timestamp: new Date().toISOString(),
+    };
+    room.sendToDashboard(progress);
+    logRoom(room.id, `[agent] ${phase}: ${message}${detail ? ` | ${detail}` : ''}`);
+  }
+
+  // Configurable timeout for remote command execution (default 60s for network latency)
+  const commandTimeoutMs = parseInt(process.env.AGENT_COMMAND_TIMEOUT || '60000', 10);
+
   try {
     const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '10', 10);
+
+    sendProgress('step', 'Starting agent loop...', `Goal: ${plan.substring(0, 100)}`);
+
     const result = await runAgentLoop({
       goal,
-      sendAndWait: (cmd) => room.sendCommandAndWait(cmd),
+      sendAndWait: (cmd) => room.sendCommandAndWait(cmd, commandTimeoutMs),
       maxIterations: maxIter,
       callbacks: {
         onStep: (step: number, maxIterations: number) => {
-          // Send progress to chatStore (not workflowStore) via server_agent_progress
-          const progress: ServerAgentProgress = {
-            type: 'server_agent_progress',
-            conversationId,
-            step,
-            maxSteps: maxIterations,
-            thinking: `Step ${step} of ${maxIterations}`,
-          };
-          room.sendToDashboard(progress);
+          currentStep = step;
+          currentMaxSteps = maxIterations;
+          sendProgress('step', `Step ${step} of ${maxIterations}`);
+        },
+        onObservation: (obs: unknown, step: number) => {
+          const observation = obs as Record<string, unknown>;
+          const app = (observation.frontmostApp as string) || 'unknown';
+          const title = (observation.windowTitle as string) || '';
+          sendProgress('observing', `Observing: ${app}`, title ? `Window: ${title}` : undefined);
+        },
+        onThinking: () => {
+          sendProgress('thinking', 'Sending to Claude...');
+        },
+        onParsed: (parsed: unknown, step: number) => {
+          const p = parsed as Record<string, unknown>;
+          const type = p.type as string;
+          if (type === 'action') {
+            const cmd = p.command as Record<string, unknown>;
+            sendProgress('parsed', `Claude decided: ${cmd?.action || 'action'}`, (p.thinking as string)?.substring(0, 150), cmd?.layer as AgentCommand['layer']);
+          } else if (type === 'complete') {
+            sendProgress('parsed', 'Claude says: goal complete');
+          } else if (type === 'needs_help') {
+            sendProgress('parsed', `Claude asks: ${(p.question as string)?.substring(0, 150)}`);
+          } else {
+            sendProgress('parsed', `Claude response: ${type}`);
+          }
         },
         onAction: (command: AgentCommand, thinking: string) => {
-          const progress: ServerAgentProgress = {
-            type: 'server_agent_progress',
-            conversationId,
-            step: 0,
-            maxSteps: 0,
-            thinking: thinking.substring(0, 100),
-            action: command.action,
-            layer: command.layer,
-          };
-          room.sendToDashboard(progress);
+          sendProgress('executing', `Executing: ${command.layer}/${command.action}`, thinking.substring(0, 150), command.layer);
+        },
+        onActionResult: (command: AgentCommand, result: AgentResult) => {
+          const status = result.status === 'success' ? 'Success' : 'Failed';
+          sendProgress('action_result', `${status}: ${command.layer}/${command.action}`, undefined, command.layer);
+        },
+        onComplete: (summary: string) => {
+          sendProgress('complete', summary || 'Task completed.');
+        },
+        onNeedsHelp: (question: string) => {
+          sendProgress('needs_help', question);
+        },
+        onError: (error: string, context: string) => {
+          sendProgress('error', error, `Context: ${context}`);
         },
       },
     });
@@ -1011,6 +1095,9 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
       },
     });
   } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    sendProgress('error', `Task failed: ${errorMsg}`, 'Unhandled exception in agent loop');
+
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
@@ -1018,7 +1105,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
         id: `resp_error_${previewId}`,
         role: 'system',
         type: 'error',
-        content: `Task failed: ${err instanceof Error ? err.message : String(err)}`,
+        content: `Task failed: ${errorMsg}`,
       },
     });
   } finally {

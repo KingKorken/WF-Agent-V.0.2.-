@@ -14,6 +14,20 @@ export interface ChatMessage {
   timestamp: Date;
 }
 
+export type AgentPhase =
+  | 'step' | 'observing' | 'thinking' | 'parsed'
+  | 'executing' | 'action_result' | 'complete' | 'needs_help' | 'error';
+
+export interface AgentLogEntry {
+  phase: AgentPhase;
+  step: number;
+  maxSteps: number;
+  message: string;
+  detail?: string;
+  layer?: string;
+  timestamp: string;
+}
+
 export interface AgentProgress {
   step: number;
   maxSteps: number;
@@ -36,6 +50,7 @@ interface ChatState {
   suggestionsVisible: boolean;
   drafts: Record<string, string>;
   agentProgress: AgentProgress | null;
+  agentLog: AgentLogEntry[];
 
   getActiveConversation: () => Conversation | undefined;
   sendMessage: (content: string) => void;
@@ -45,6 +60,8 @@ interface ChatState {
   getDraft: (conversationId: string) => string;
   receiveMessage: (conversationId: string, message: ChatMessage) => void;
   setAgentProgress: (conversationId: string, progress: AgentProgress) => void;
+  addAgentLogEntry: (entry: AgentLogEntry) => void;
+  clearAgentLog: () => void;
   confirmAction: (previewId: string, conversationId: string) => void;
   cancelAction: (previewId: string, conversationId: string) => void;
 }
@@ -72,6 +89,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     suggestionsVisible: true,
     drafts: {},
     agentProgress: null,
+    agentLog: [],
 
     getActiveConversation: () => {
       const { conversations, activeConversationId } = get();
@@ -170,6 +188,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         ),
         isAgentTyping: false,
         agentProgress: null,
+        agentLog: [],
       })),
 
     setAgentProgress: (_conversationId, progress) =>
@@ -177,6 +196,15 @@ export const useChatStore = create<ChatState>((set, get) => {
         agentProgress: progress,
         isAgentTyping: true,
       }),
+
+    addAgentLogEntry: (entry) =>
+      set((state) => ({
+        agentLog: [...state.agentLog, entry],
+        isAgentTyping: true,
+      })),
+
+    clearAgentLog: () =>
+      set({ agentLog: [], agentProgress: null }),
 
     confirmAction: (previewId, conversationId) => {
       wsService.send({

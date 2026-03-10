@@ -410,10 +410,9 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
     initLLMClient();
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Already initialized is fine — rethrow only real errors
-    if (!msg.includes('not found')) {
-      // initLLMClient only throws on missing API key
-    }
+    log(`[agent-loop] initLLMClient failed: ${msg}`);
+    callbacks.onError?.(msg, 'llm_init');
+    return { outcome: 'error', summary: `LLM initialization failed: ${msg}`, steps: 0 };
   }
   resetConversation();
 

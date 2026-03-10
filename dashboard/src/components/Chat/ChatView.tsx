@@ -5,6 +5,7 @@ import { ChatGreeting } from './ChatGreeting';
 import { ChatSuggestions } from './ChatSuggestions';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
+import { AgentActivityLog } from './AgentActivityLog';
 import { LoadingDots } from '../shared/LoadingDots';
 import styles from './ChatView.module.css';
 
@@ -15,16 +16,18 @@ export function ChatView() {
     s.conversations.find((c) => c.id === s.activeConversationId)
   );
   const isAgentTyping = useChatStore((s) => s.isAgentTyping);
+  const agentLogLength = useChatStore((s) => s.agentLog.length);
   const suggestionsVisible = useChatStore((s) => s.suggestionsVisible);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const messages = conversation?.messages ?? [];
   const isEmpty = messages.length === 0;
+  const hasAgentLog = agentLogLength > 0;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, isAgentTyping]);
+  }, [messages.length, isAgentTyping, agentLogLength]);
 
   return (
     <div className={styles.root}>
@@ -42,7 +45,8 @@ export function ChatView() {
             {messages.map((msg) => (
               <ChatMessage key={msg.id} message={msg} conversationId={conversation!.id} />
             ))}
-            {isAgentTyping && (
+            {isAgentTyping && hasAgentLog && <AgentActivityLog />}
+            {isAgentTyping && !hasAgentLog && (
               <div className={styles.typingIndicator}>
                 <LoadingDots />
               </div>

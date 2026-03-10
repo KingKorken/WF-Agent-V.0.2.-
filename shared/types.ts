@@ -467,15 +467,33 @@ export interface ServerChatResponse {
   };
 }
 
+/** Phase of the agent loop — what stage the agent is currently in */
+export type AgentPhase =
+  | 'step'           // New step starting
+  | 'observing'      // Capturing screen, elements, etc.
+  | 'thinking'       // Sending to Claude API
+  | 'parsed'         // Claude returned a response
+  | 'executing'      // About to execute an action
+  | 'action_result'  // Action completed (success or failure)
+  | 'complete'       // Goal achieved
+  | 'needs_help'     // Agent has a question
+  | 'error';         // Something went wrong
+
 /** Agent thinking/action progress from server to dashboard */
 export interface ServerAgentProgress {
   type: 'server_agent_progress';
   conversationId: string;
+  phase: AgentPhase;
   step: number;
   maxSteps: number;
-  thinking: string;
-  action?: string;
+  /** Human-readable description of what's happening */
+  message: string;
+  /** Additional detail (action name, error context, etc.) */
+  detail?: string;
+  /** Which layer is involved */
   layer?: CommandLayer;
+  /** Timestamp of this event */
+  timestamp: string;
 }
 
 /** Agent connection status from server to dashboard */

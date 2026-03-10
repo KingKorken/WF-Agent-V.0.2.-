@@ -46,11 +46,23 @@ function handleMessage(message: WebSocketMessage): void {
 
     case 'server_agent_progress': {
       const msg = message as ServerAgentProgress;
-      useChatStore.getState().setAgentProgress(msg.conversationId, {
+      const store = useChatStore.getState();
+      // Add to the activity log
+      store.addAgentLogEntry({
+        phase: msg.phase,
         step: msg.step,
         maxSteps: msg.maxSteps,
-        thinking: msg.thinking,
-        action: msg.action,
+        message: msg.message,
+        detail: msg.detail,
+        layer: msg.layer,
+        timestamp: msg.timestamp,
+      });
+      // Also update the legacy agentProgress for backward compat
+      store.setAgentProgress(msg.conversationId, {
+        step: msg.step,
+        maxSteps: msg.maxSteps,
+        thinking: msg.message,
+        action: msg.detail,
         layer: msg.layer,
       });
       break;
