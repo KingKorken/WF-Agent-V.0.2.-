@@ -15,6 +15,7 @@ import { log } from '../utils/logger';
 import { saveConfig } from '../utils/config';
 import { startConnection } from '../main';
 import { BRIDGE_URL } from '../build-config';
+import { checkRequiredPermissions } from '../platform/permissions';
 
 type IpcHandler = (event: IpcMainEvent, ...args: unknown[]) => void;
 
@@ -189,16 +190,14 @@ function validateToken(serverUrl: string, token: string): Promise<boolean> {
 }
 
 /**
- * Check macOS permissions. Only runs on macOS (darwin).
+ * Check macOS permissions. Uses shared module for accessibility + screen recording,
+ * adds microphone check as a setup-only concern (not needed for command execution).
  */
 function checkPermissions(): { accessibility: boolean; screenRecording: boolean; microphone: boolean } {
-  if (process.platform !== 'darwin') {
-    return { accessibility: true, screenRecording: true, microphone: true };
-  }
+  const shared = checkRequiredPermissions();
+  const microphone = process.platform === 'darwin'
+    ? systemPreferences.getMediaAccessStatus('microphone') === 'granted'
+    : true;
 
-  return {
-    accessibility: systemPreferences.isTrustedAccessibilityClient(false),
-    screenRecording: systemPreferences.getMediaAccessStatus('screen') === 'granted',
-    microphone: systemPreferences.getMediaAccessStatus('microphone') === 'granted',
-  };
+  return { ...shared, microphone };
 }

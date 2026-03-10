@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { wsService } from '../services/websocket';
 
 export type MessageRole = 'user' | 'agent' | 'system';
-export type MessageType = 'text' | 'progress-card' | 'data-card' | 'error' | 'action-preview';
+export type MessageType = 'text' | 'progress-card' | 'data-card' | 'error' | 'action-preview' | 'activity-log';
 
 export interface ChatMessage {
   id: string;
@@ -11,6 +11,7 @@ export interface ChatMessage {
   content: string;
   suggestion?: string;
   previewId?: string;
+  logEntries?: AgentLogEntry[];
   timestamp: Date;
 }
 
@@ -181,16 +182,30 @@ export const useChatStore = create<ChatState>((set, get) => {
     getDraft: (conversationId) => get().drafts[conversationId] || '',
 
     receiveMessage: (conversationId, message) =>
-      set((state) => ({
-        conversations: state.conversations.map((c) =>
-          c.id === conversationId
-            ? { ...c, messages: [...c.messages, message] }
-            : c
-        ),
-        isAgentTyping: false,
-        agentProgress: null,
-        agentLog: [],
-      })),
+      set((state) => {
+        // Snapshot the activity log into a persistent message before clearing
+        const logSnapshot: ChatMessage[] = state.agentLog.length > 0
+          ? [{
+              id: `activity-log-${Date.now()}`,
+              role: 'system' as MessageRole,
+              type: 'activity-log' as MessageType,
+              content: `Agent executed ${state.agentLog[state.agentLog.length - 1]?.step || 0} steps`,
+              logEntries: [...state.agentLog],
+              timestamp: new Date(),
+            }]
+          : [];
+
+        return {
+          conversations: state.conversations.map((c) =>
+            c.id === conversationId
+              ? { ...c, messages: [...c.messages, ...logSnapshot, message] }
+              : c
+          ),
+          isAgentTyping: false,
+          agentProgress: null,
+          agentLog: [],
+        };
+      }),
 
     setAgentProgress: (_conversationId, progress) =>
       set({
@@ -208,7 +223,35 @@ export const useChatStore = create<ChatState>((set, get) => {
       set({ agentLog: [], agentProgress: null }),
 
     resetTypingState: () =>
-      set({ isAgentTyping: false, agentProgress: null, agentLog: [] }),
+      set((state) => {
+        // Snapshot any in-progress log before clearing (WS reconnect protection)
+        if (state.agentLog.length === 0) {
+          return { isAgentTyping: false, agentProgress: null, agentLog: [] };
+        }
+        const activeConvId = state.conversations.find((c) =>
+          c.messages.some((m) => m.type === 'action-preview')
+        )?.id ?? state.conversations[0]?.id;
+        const logMessage: ChatMessage = {
+          id: `activity-log-${Date.now()}`,
+          role: 'system' as MessageRole,
+          type: 'activity-log' as MessageType,
+          content: `Agent interrupted (reconnect) after ${state.agentLog[state.agentLog.length - 1]?.step || 0} steps`,
+          logEntries: [...state.agentLog],
+          timestamp: new Date(),
+        };
+        return {
+          conversations: activeConvId
+            ? state.conversations.map((c) =>
+                c.id === activeConvId
+                  ? { ...c, messages: [...c.messages, logMessage] }
+                  : c
+              )
+            : state.conversations,
+          isAgentTyping: false,
+          agentProgress: null,
+          agentLog: [],
+        };
+      }),
 
     confirmAction: (previewId, conversationId) => {
       wsService.send({

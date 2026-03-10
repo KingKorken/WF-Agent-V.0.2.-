@@ -97,6 +97,115 @@
   opacity: 0.6;
 }
 
+/* Activity log card */
+
+.message[data-type="activity-log"] {
+  padding: var(--space-xs) 0;
+  max-width: 100%;
+}
+
+.activityLogCard {
+  border-left: 3px solid var(--color-text);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+}
+
+.activityLogHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border: none;
+  border-bottom: 1px solid var(--color-divider);
+  background: none;
+  cursor: pointer;
+  font-family: var(--font-family);
+}
+
+.activityLogHeader:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.activityLogTitle {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text);
+}
+
+.activityLogToggle {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.activityLogBody {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--space-xs) var(--space-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activityLogEntry {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  font-family: var(--font-family);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-base);
+  color: var(--color-text-secondary);
+}
+
+.activityLogEntryError {
+  color: var(--color-error);
+}
+
+.activityLogEntryComplete {
+  font-weight: var(--font-weight-medium);
+}
+
+.activityLogTime {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  min-width: 42px;
+}
+
+.activityLogLabel {
+  flex-shrink: 0;
+  font-weight: var(--font-weight-medium);
+  min-width: 52px;
+  color: var(--color-text-muted);
+}
+
+.activityLogMsg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activityLogDetail {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activityLogSummary {
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--color-divider);
+  margin-top: var(--space-xs);
+  font-family: var(--font-family);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
 /* Action preview card */
 
 .message[data-type="action-preview"] {

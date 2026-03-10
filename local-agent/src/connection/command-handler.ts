@@ -13,6 +13,7 @@
 import { AgentCommand, AgentResult } from '@workflow-agent/shared';
 import { routeCommand } from '../executor/layer-router';
 import { log, error as logError } from '../utils/logger';
+import { getMissingPermissions } from '../platform/permissions';
 
 /** Timestamp prefix for log messages */
 function timestamp(): string {
@@ -60,6 +61,19 @@ export async function handleIncomingMessage(rawMessage: string): Promise<string 
       id: msg.id || 'unknown',
       status: 'error',
       data: { error: 'Invalid command: missing required fields (id, layer, action)' },
+    });
+  }
+
+  // Step 3.5: Pre-flight macOS permission check
+  const missingPerms = getMissingPermissions();
+  if (missingPerms.length > 0) {
+    const permError = `Missing macOS permissions: ${missingPerms.join(', ')}. Open System Settings > Privacy & Security to grant access.`;
+    logError(`[${timestamp()}] [command-handler] ${permError}`);
+    return JSON.stringify({
+      type: 'result',
+      id: msg.id || 'unknown',
+      status: 'error',
+      data: { error: permError },
     });
   }
 
