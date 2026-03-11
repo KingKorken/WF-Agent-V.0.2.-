@@ -12,7 +12,7 @@
  * through the system tray icon in the menu bar.
  */
 
-import { app } from 'electron';
+import { app, dialog } from 'electron';
 import { WebSocketClient } from './connection/websocket-client';
 import { createTray, updateConnectionStatus } from './ui/tray';
 import { APP_NAME } from '@workflow-agent/shared';
@@ -66,7 +66,7 @@ let wsClient: WebSocketClient;
 
 /**
  * Start the WebSocket connection to the bridge server.
- * Exported so setup-window.ts can call it after token validation.
+ * Passed as a callback to showSetupWindow() on first launch.
  */
 export function startConnection(roomId: string): void {
   const serverUrl = process.env.WS_URL || BRIDGE_URL;
@@ -109,8 +109,15 @@ app.whenReady().then(async () => {
     startConnection(savedConfig.roomId);
   } else {
     log(`[${timestamp()}] [main] No room ID found — showing setup window`);
-    const { showSetupWindow } = await import('./ui/setup-window');
-    showSetupWindow();
+    try {
+      const { showSetupWindow } = await import('./ui/setup-window');
+      showSetupWindow(startConnection);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`[${timestamp()}] [main] CRITICAL: Failed to show setup window: ${msg}`);
+      dialog.showErrorBox('Setup Error',
+        `Failed to open setup window.\n\n${msg}\n\nPlease reinstall the application.`);
+    }
   }
 
   log(`[${timestamp()}] [main] ${APP_NAME} is running. Check the system tray.`);

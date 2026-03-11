@@ -13,7 +13,8 @@ import * as path from 'path';
 import WebSocket from 'ws';
 import { log } from '../utils/logger';
 import { saveConfig } from '../utils/config';
-import { startConnection } from '../main';
+// NOTE: Do NOT import from '../main' — it creates a circular dependency that breaks
+// module loading in packaged builds. startConnection is passed as a callback instead.
 import { BRIDGE_URL } from '../build-config';
 import { checkRequiredPermissions } from '../platform/permissions';
 
@@ -21,6 +22,7 @@ type IpcHandler = (event: IpcMainEvent, ...args: unknown[]) => void;
 
 let setupWindow: BrowserWindow | null = null;
 let validatedToken: string | null = null;
+let onConnectCallback: ((roomId: string) => void) | null = null;
 
 // IPC handler references for cleanup
 const ipcHandlers = {
@@ -44,8 +46,11 @@ function cleanupIpcHandlers(): void {
 
 /**
  * Show the setup window for room token entry and permissions check.
+ * @param onConnect — Called with the validated room token when the user completes setup.
+ *                    Passed as a callback to avoid circular dependency with main.ts.
  */
-export function showSetupWindow(): void {
+export function showSetupWindow(onConnect: (roomId: string) => void): void {
+  onConnectCallback = onConnect;
   if (setupWindow) {
     setupWindow.focus();
     return;
@@ -168,9 +173,9 @@ export function showSetupWindow(): void {
   };
 
   ipcHandlers.done = (_event: IpcMainEvent) => {
-    if (validatedToken) {
+    if (validatedToken && onConnectCallback) {
       saveConfig({ roomId: validatedToken });
-      startConnection(validatedToken);
+      onConnectCallback(validatedToken);
 
       if (setupWindow) {
         setupWindow.close();

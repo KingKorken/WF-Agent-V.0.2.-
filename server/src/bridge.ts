@@ -115,16 +115,29 @@ let runAgentLoop: ((config: AgentLoopConfig) => Promise<AgentLoopResult>) | null
 
 async function loadAgentModules(): Promise<boolean> {
   const basePath = process.env.AGENT_MODULES_PATH || path.join(__dirname, '../../local-agent/dist');
+  const fullPath = path.join(basePath, 'src/agent/agent-loop');
+
+  log(`[loadAgentModules] AGENT_MODULES_PATH env: ${process.env.AGENT_MODULES_PATH || '(not set, using default)'}`);
+  log(`[loadAgentModules] Resolved base: ${basePath}`);
+  log(`[loadAgentModules] Loading from: ${fullPath}`);
 
   try {
-    const agentLoopModule = require(path.join(basePath, 'src/agent/agent-loop'));
+    const agentLoopModule = require(fullPath);
     runAgentLoop = agentLoopModule.runAgentLoop;
+
+    if (!runAgentLoop) {
+      log('CRITICAL: agent-loop module loaded but runAgentLoop export is missing');
+      return false;
+    }
 
     log('Agent loop modules loaded successfully');
     return true;
   } catch (err) {
-    log(`Warning: Could not load agent loop modules from ${basePath}: ${err instanceof Error ? err.message : String(err)}`);
-    log('Agent loop features will be unavailable. Build local-agent first: cd local-agent && npm run build');
+    log(`CRITICAL: Could not load agent loop modules from ${fullPath}: ${err instanceof Error ? err.message : String(err)}`);
+    if (err instanceof Error && err.stack) {
+      log(`Stack: ${err.stack}`);
+    }
+    log('Agent loop features will be unavailable. Task execution will fail.');
     return false;
   }
 }
