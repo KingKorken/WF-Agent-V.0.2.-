@@ -9,13 +9,13 @@
  */
 
 import { BrowserWindow, ipcMain, IpcMainEvent, shell, systemPreferences } from 'electron';
-import * as path from 'path';
 import WebSocket from 'ws';
 import { log } from '../utils/logger';
 import { saveConfig } from '../utils/config';
 import { startConnection } from '../main';
 import { BRIDGE_URL } from '../build-config';
 import { checkRequiredPermissions } from '../platform/permissions';
+import { getResourcePath } from '../utils/app-paths';
 
 type IpcHandler = (event: IpcMainEvent, ...args: unknown[]) => void;
 
@@ -51,9 +51,17 @@ export function showSetupWindow(): void {
     return;
   }
 
+  // Use getResourcePath() for asar-safe path resolution in packaged builds.
+  // __dirname resolves inside the .asar archive which breaks preload scripts.
+  const preloadPath = getResourcePath('dist/src/ui/setup-preload.js');
+  const htmlPath = getResourcePath('dist/src/ui/setup.html');
+  log(`[setup] Preload path: ${preloadPath}`);
+  log(`[setup] HTML path: ${htmlPath}`);
+
   setupWindow = new BrowserWindow({
     width: 460,
     height: 520,
+    show: false, // Wait for ready-to-show to avoid blank flash
     resizable: false,
     minimizable: false,
     maximizable: false,
@@ -63,13 +71,23 @@ export function showSetupWindow(): void {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, '../ui/setup-preload.js'),
+      preload: preloadPath,
     },
   });
 
+  // Show window once content is ready (prevents blank flash)
+  setupWindow.once('ready-to-show', () => {
+    log('[setup] Window ready — showing');
+    setupWindow?.show();
+  });
+
   // Load the setup HTML page
-  const htmlPath = path.join(__dirname, '../ui/setup.html');
   setupWindow.loadFile(htmlPath);
+
+  // Log load failures for debugging
+  setupWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    log(`[setup] Failed to load HTML (${errorCode}): ${errorDescription}`);
+  });
 
   // Clean up IPC handlers AND window reference on close (B2 fix)
   setupWindow.on('closed', () => {
