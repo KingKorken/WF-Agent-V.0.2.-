@@ -35,6 +35,8 @@ import {
 import type { LearnedAction } from '../skills/registry';
 import { discoverAppCapabilities } from '../skills/discovery';
 import type { DiscoveryResult } from '../skills/discovery';
+import { decomposeTask } from './task-decomposer';
+import type { SubGoal, SubGoalResult, SubGoalOutcome } from './task-decomposer';
 
 // ---------------------------------------------------------------------------
 // Learned action helpers
@@ -290,6 +292,15 @@ export interface AgentLoopCallbacks {
 
   /** Called on errors (observation, LLM, execution) */
   onError?: (error: string, context: string) => void;
+
+  /** Called when task decomposition completes */
+  onDecomposition?: (subGoals: SubGoal[]) => void;
+
+  /** Called when a sub-goal begins execution */
+  onSubGoalStart?: (subGoal: SubGoal, index: number, total: number) => void;
+
+  /** Called when a sub-goal finishes (any outcome) */
+  onSubGoalComplete?: (subGoal: SubGoal, index: number, total: number, outcome: SubGoalOutcome) => void;
 }
 
 /** Configuration for the agent loop */
@@ -308,12 +319,18 @@ export interface AgentLoopConfig {
 
   /** Delay between action and next observation in ms (default: 800) */
   settleDelayMs?: number;
+
+  /** Whether to decompose the goal into sub-goals (default: false) */
+  decompose?: boolean;
+
+  /** Abort signal — check at top of each iteration to support cancel */
+  signal?: { aborted: boolean };
 }
 
 /** Result of the agent loop */
 export interface AgentLoopResult {
   /** How the loop ended */
-  outcome: 'complete' | 'needs_help' | 'max_iterations' | 'error' | 'skill_generation_needed';
+  outcome: 'complete' | 'partial_complete' | 'needs_help' | 'max_iterations' | 'error' | 'cancelled' | 'skill_generation_needed';
 
   /** Summary (from LLM on complete, or error description) */
   summary: string;
@@ -329,6 +346,9 @@ export interface AgentLoopResult {
 
   /** Discovery results for the app (only for skill_generation_needed) */
   discovery?: DiscoveryResult;
+
+  /** Per-sub-goal outcomes (only present when decomposition was used) */
+  subGoalResults?: SubGoalResult[];
 }
 
 // ---------------------------------------------------------------------------
@@ -388,82 +408,92 @@ export function formatActionResult(command: AgentCommand, result: AgentResult): 
 // Main export
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Sub-goal iteration budget & global ceiling
+// ---------------------------------------------------------------------------
+
+const GLOBAL_ITERATION_CEILING = 100;
+const SUB_GOAL_NUDGE_THRESHOLD = 10;
+
 /**
- * Run the autonomous agent loop.
+ * Run one sub-goal through the observe-decide-act loop.
+ * Returns the outcome plus how many global steps were consumed.
  *
- * Observes the screen, sends observations to Claude, executes Claude's decisions.
- * Repeats until the goal is achieved, max iterations reached, or an unrecoverable error.
+ * This is the inner loop extracted so both flat-mode and sub-goal-mode
+ * can share the same iteration logic.
  */
-export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopResult> {
-  const {
-    goal,
-    sendAndWait,
-    callbacks = {},
-    maxIterations = parseInt(process.env.AGENT_MAX_ITERATIONS || '25', 10),
-    settleDelayMs = 400,
-  } = config;
-
-  log(`[agent-loop] Starting. Goal: "${goal.substring(0, 80)}". Max iterations: ${maxIterations}`);
-
-  // Initialize LLM
-  try {
-    initLLMClient();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log(`[agent-loop] initLLMClient failed: ${msg}`);
-    callbacks.onError?.(msg, 'llm_init');
-    return { outcome: 'error', summary: `LLM initialization failed: ${msg}`, steps: 0 };
-  }
-  resetConversation();
-
-  const systemPrompt = buildSystemPrompt();
-  const conversationHistory: ConversationMessage[] = [];
-  let browserActive = false;
-  let consecutiveErrors = 0;
-  let commandCounter = 0;
+async function runSubGoalLoop(
+  subGoalDescription: string,
+  subGoalLabel: string,
+  goalState: {
+    conversationHistory: ConversationMessage[];
+    browserActive: boolean;
+    commandCounter: number;
+    discoveredApps: Set<string>;
+    appFailures: Record<string, number>;
+    skillInjectedApps: Set<string>;
+  },
+  sendAndWait: SendAndWait,
+  callbacks: AgentLoopCallbacks,
+  settleDelayMs: number,
+  globalStep: number,
+  maxGlobalSteps: number,
+  signal?: { aborted: boolean },
+): Promise<{ outcome: 'complete' | 'needs_help' | 'stuck' | 'max_iterations' | 'error' | 'cancelled' | 'skill_generation_needed'; summary: string; stepsUsed: number; question?: string; app?: string; discovery?: DiscoveryResult }> {
   const MAX_CONSECUTIVE_ERRORS = 3;
-
-  // Track per-app failures on Layer 4/5 for skill discovery
-  const appFailures: Record<string, number> = {};
-  const discoveredApps = new Set<string>();
   const DISCOVERY_THRESHOLD = 3;
 
-  // Stuck detection state (per-session, not persisted)
+  // Per-sub-goal state (resets for each sub-goal)
   const actionHistory: ActionRecord[] = [];
   const stuckSignals: Record<string, number> = {};
+  let consecutiveErrors = 0;
+  let subGoalSteps = 0;
 
-  // Track which apps have already had skill injection (prevents duplicate messages)
-  const skillInjectedApps = new Set<string>();
+  // Rebuild system prompt at sub-goal start (picks up newly discovered skills)
+  const systemPrompt = buildSystemPrompt();
 
-  for (let step = 1; step <= maxIterations; step++) {
-    callbacks.onStep?.(step, maxIterations);
+  // Inject sub-goal context into conversation
+  goalState.conversationHistory.push({
+    role: 'user',
+    content: `SUB-GOAL: ${subGoalLabel}\n${subGoalDescription}\n\nFocus on completing this specific sub-goal. When it is done, respond with status "complete" and a brief summary.`,
+  });
+
+  while (globalStep + subGoalSteps < maxGlobalSteps) {
+    const step = globalStep + subGoalSteps + 1;
+    subGoalSteps++;
+
+    // Check cancel signal
+    if (signal?.aborted) {
+      return { outcome: 'cancelled', summary: 'Cancelled by user', stepsUsed: subGoalSteps };
+    }
+
+    callbacks.onStep?.(step, maxGlobalSteps);
 
     // === OBSERVE ===
     let observation: Observation;
     try {
-      observation = await observe(sendAndWait, browserActive);
+      observation = await observe(sendAndWait, goalState.browserActive);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       callbacks.onError?.(msg, 'observation');
-      return { outcome: 'error', summary: `Observation failed: ${msg}`, steps: step };
+      return { outcome: 'error', summary: `Observation failed: ${msg}`, stepsUsed: subGoalSteps };
     }
 
     callbacks.onObservation?.(observation, step);
 
     // === BUILD MESSAGE ===
-    const userMessage = formatObservation(observation, goal, step);
-    conversationHistory.push(userMessage);
+    const userMessage = formatObservation(observation, subGoalDescription, step);
+    goalState.conversationHistory.push(userMessage);
 
-    // === SKILL INJECTION (after observation message, before DECIDE) ===
+    // === SKILL INJECTION ===
     const currentApp = observation.frontmostApp;
-    if (currentApp && !skillInjectedApps.has(currentApp)) {
+    if (currentApp && !goalState.skillInjectedApps.has(currentApp)) {
       const appSkill = getSkillForApp(currentApp);
       if (appSkill) {
-        skillInjectedApps.add(currentApp);
-        // Sanitize app name to alphanumeric + spaces only
+        goalState.skillInjectedApps.add(currentApp);
         const safeName = currentApp.replace(/[^a-zA-Z0-9 ]/g, '');
         const cmds = appSkill.commands.map(c => c.name).join(', ');
-        conversationHistory.push({
+        goalState.conversationHistory.push({
           role: 'user',
           content: `SKILL AVAILABLE: The app "${safeName}" has a registered skill. Use the ${safeName} skill commands (${cmds}) instead of vision/accessibility for this app.`,
         });
@@ -475,31 +505,30 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
     callbacks.onThinking?.();
     let responseText: string;
     try {
-      responseText = await sendMessage(systemPrompt, conversationHistory);
+      responseText = await sendMessage(systemPrompt, goalState.conversationHistory);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       callbacks.onError?.(msg, 'llm');
-      return { outcome: 'error', summary: `LLM call failed: ${msg}`, steps: step };
+      return { outcome: 'error', summary: `LLM call failed: ${msg}`, stepsUsed: subGoalSteps };
     }
 
-    // Add assistant response to history
-    conversationHistory.push({ role: 'assistant', content: responseText });
+    goalState.conversationHistory.push({ role: 'assistant', content: responseText });
 
     // === PARSE RESPONSE ===
-    commandCounter++;
-    const parsed = parseResponse(responseText, commandCounter);
+    goalState.commandCounter++;
+    const parsed = parseResponse(responseText, goalState.commandCounter);
     callbacks.onParsed?.(parsed, step);
 
     // --- Handle: complete ---
     if (parsed.type === 'complete') {
       callbacks.onComplete?.(parsed.summary, step);
-      return { outcome: 'complete', summary: parsed.summary, steps: step };
+      return { outcome: 'complete', summary: parsed.summary, stepsUsed: subGoalSteps };
     }
 
     // --- Handle: needs_help ---
     if (parsed.type === 'needs_help') {
       callbacks.onNeedsHelp?.(parsed.question);
-      return { outcome: 'needs_help', summary: parsed.thinking, steps: step, question: parsed.question };
+      return { outcome: 'needs_help', summary: parsed.thinking, stepsUsed: subGoalSteps, question: parsed.question };
     }
 
     // --- Handle: parse error ---
@@ -511,11 +540,11 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
         return {
           outcome: 'error',
           summary: `${MAX_CONSECUTIVE_ERRORS} consecutive parse errors. Last: ${parsed.error}`,
-          steps: step,
+          stepsUsed: subGoalSteps,
         };
       }
 
-      conversationHistory.push({
+      goalState.conversationHistory.push({
         role: 'user',
         content: 'Your previous response was not valid JSON. Respond with EXACTLY ONE JSON object — no markdown, no backticks, no extra text.',
       });
@@ -529,10 +558,10 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
 
       // Track browser state
       if (parsed.command.layer === 'cdp' && parsed.command.action === 'launch') {
-        browserActive = true;
+        goalState.browserActive = true;
       }
       if (parsed.command.layer === 'cdp' && parsed.command.action === 'close') {
-        browserActive = false;
+        goalState.browserActive = false;
       }
 
       // === ACT ===
@@ -547,68 +576,60 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
         const failLayer = parsed.command.layer;
         if (failLayer === 'accessibility' || failLayer === 'vision') {
           const failApp = observation.frontmostApp;
-          appFailures[failApp] = (appFailures[failApp] || 0) + 1;
+          goalState.appFailures[failApp] = (goalState.appFailures[failApp] || 0) + 1;
 
-          if (appFailures[failApp] >= DISCOVERY_THRESHOLD && !discoveredApps.has(failApp)) {
-            discoveredApps.add(failApp);
+          if (goalState.appFailures[failApp] >= DISCOVERY_THRESHOLD && !goalState.discoveredApps.has(failApp)) {
+            goalState.discoveredApps.add(failApp);
 
-            // Check registry first — maybe a skill already exists
             const existingSkill = getSkillForApp(failApp);
             if (existingSkill) {
-              conversationHistory.push({
+              goalState.conversationHistory.push({
                 role: 'user',
                 content: `SKILL HINT: A Layer 1 skill already exists for "${failApp}". Use shell/exec with the ${existingSkill.runtime} ${existingSkill.file} commands instead of ${failLayer} automation. Available commands: ${existingSkill.commands.map(c => c.name).join(', ')}.`,
               });
             } else {
-              // Check for learned actions — we may already know how to talk to this app
               const learnedActions = getLearnedActionsForApp(failApp);
               if (learnedActions.length > 0) {
-                conversationHistory.push({
+                goalState.conversationHistory.push({
                   role: 'user',
                   content: `LEARNED ACTIONS for "${failApp}": You have previously used these successfully:\n${learnedActions.map((a: LearnedAction) => `- ${a.description}: ${formatActionHint(a)}`).join('\n')}\nTry these instead of ${failLayer}.`,
                 });
-                // Don't trigger discovery — we already know how to talk to this app
-                conversationHistory.push({
+                goalState.conversationHistory.push({
                   role: 'user',
                   content: `The action failed with error: ${msg}. What should we try instead?`,
                 });
                 continue;
               }
 
-              // Check if already discovered with no viable interfaces
               const alreadyDiscovered = getDiscoveredApp(failApp);
               if (alreadyDiscovered && !alreadyDiscovered.appleScript && !alreadyDiscovered.cli && !alreadyDiscovered.api) {
                 log(`[agent-loop] "${failApp}" was previously discovered with no viable interfaces — continuing with ${failLayer}`);
-                conversationHistory.push({
+                goalState.conversationHistory.push({
                   role: 'user',
                   content: `"${failApp}" has no known automation interfaces (previously discovered). Continue with ${failLayer}.`,
                 });
               } else {
-                // Run discovery — this time we PAUSE if viable interfaces are found
                 try {
                   const disc = await discoverAppCapabilities(failApp);
                   log(`[agent-loop] Discovery for "${failApp}": ${disc.recommendation}`);
 
                   const hasViableInterface = disc.appleScript.supported || disc.cli.found || disc.knownApi.hasApi;
                   if (hasViableInterface) {
-                    // PAUSE — signal the caller that skill generation is needed
                     log(`[agent-loop] Pausing for skill generation: "${failApp}"`);
                     return {
                       outcome: 'skill_generation_needed',
                       summary: `Cannot reliably control "${failApp}" via ${failLayer}. Skill generation recommended.`,
-                      steps: step,
+                      stepsUsed: subGoalSteps,
                       app: failApp,
                       discovery: disc,
                     };
                   } else {
-                    // No viable interfaces — continue with vision/accessibility
-                    conversationHistory.push({
+                    goalState.conversationHistory.push({
                       role: 'user',
                       content: `SKILL DISCOVERY: ${disc.recommendation} For now, continuing with ${failLayer}.`,
                     });
                   }
                 } catch {
-                  // Discovery failed — continue without disrupting the loop
                   log(`[agent-loop] Discovery failed for "${failApp}" — continuing`);
                 }
               }
@@ -616,7 +637,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
           }
         }
 
-        conversationHistory.push({
+        goalState.conversationHistory.push({
           role: 'user',
           content: `The action failed with error: ${msg}. What should we try instead?`,
         });
@@ -629,10 +650,10 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
       const actLayer = parsed.command.layer;
       if ((actLayer === 'accessibility' || actLayer === 'vision') && result.status === 'success') {
         const actApp = observation.frontmostApp;
-        appFailures[actApp] = 0;
+        goalState.appFailures[actApp] = 0;
       }
 
-      // Capture successful actions for learning (shell, CDP, accessibility)
+      // Capture successful actions for learning
       if (result.status === 'success') {
         captureLearnedAction(parsed, observation, result);
       }
@@ -650,13 +671,11 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
         actionHistory.push(record);
         if (actionHistory.length > MAX_ACTION_HISTORY) actionHistory.shift();
 
-        // Reset stuck counter if screen changed (agent making progress)
         const prevRecord = actionHistory.length >= 2 ? actionHistory[actionHistory.length - 2] : null;
         if (prevRecord && (prevRecord.app !== observation.frontmostApp || prevRecord.windowTitle !== observation.windowTitle)) {
           stuckSignals[observation.frontmostApp] = 0;
         }
 
-        // Detect stuck patterns
         const stuckType = detectStuck(actionHistory, observation);
         if (stuckType) {
           const stuckApp = observation.frontmostApp;
@@ -666,23 +685,23 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
           if (stuckSignals[stuckApp] >= STUCK_THRESHOLD) {
             const stuckActions = getLearnedActionsForApp(stuckApp);
             if (stuckActions.length > 0) {
-              conversationHistory.push({
+              goalState.conversationHistory.push({
                 role: 'user',
                 content: `STUCK DETECTION: You seem to be stuck on "${stuckApp}" — repeating similar actions without progress. Here are actions that previously worked for this app:\n${stuckActions.map((a: LearnedAction) => `- ${a.description}: ${formatActionHint(a)}`).join('\n')}\nTry a different approach.`,
               });
             } else {
-              conversationHistory.push({
+              goalState.conversationHistory.push({
                 role: 'user',
                 content: `STUCK DETECTION: You seem to be stuck on "${stuckApp}" — repeating actions without progress. Try a completely different approach:\n- Use a different layer (shell command instead of clicking)\n- Try osascript to control the app via AppleScript\n- Look for keyboard shortcuts instead of clicking buttons`,
               });
             }
           }
 
-          if (stuckSignals[stuckApp] >= UNRELIABLE_THRESHOLD && !discoveredApps.has(stuckApp)) {
-            discoveredApps.add(stuckApp);
+          if (stuckSignals[stuckApp] >= UNRELIABLE_THRESHOLD && !goalState.discoveredApps.has(stuckApp)) {
+            goalState.discoveredApps.add(stuckApp);
             const existingSkill = getSkillForApp(stuckApp);
             if (existingSkill) {
-              conversationHistory.push({
+              goalState.conversationHistory.push({
                 role: 'user',
                 content: `SKILL HINT: A Layer 1 skill exists for "${stuckApp}". Use it instead.`,
               });
@@ -694,7 +713,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
                   return {
                     outcome: 'skill_generation_needed',
                     summary: `Vision unreliable for "${stuckApp}". Skill generation recommended.`,
-                    steps: step,
+                    stepsUsed: subGoalSteps,
                     app: stuckApp,
                     discovery: disc,
                   };
@@ -704,13 +723,27 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
               }
             }
           }
+
+          // If we've been stuck long enough, bail out of this sub-goal
+          if (stuckSignals[stuckApp] >= UNRELIABLE_THRESHOLD) {
+            return { outcome: 'stuck', summary: `Stuck on "${stuckApp}": ${stuckType}`, stepsUsed: subGoalSteps };
+          }
         }
       }
 
       // Feed action result back to the LLM
       const resultFeedback = formatActionResult(parsed.command, result);
       if (resultFeedback) {
-        conversationHistory.push({ role: 'user', content: resultFeedback });
+        goalState.conversationHistory.push({ role: 'user', content: resultFeedback });
+      }
+
+      // --- Sub-goal iteration nudge ---
+      if (subGoalSteps > 0 && subGoalSteps % SUB_GOAL_NUDGE_THRESHOLD === 0) {
+        goalState.conversationHistory.push({
+          role: 'user',
+          content: `You have spent ${subGoalSteps} iterations on this sub-goal ("${subGoalLabel}"). If you believe this sub-goal is complete, respond with status "complete". If you are stuck, report status: needs_help.`,
+        });
+        log(`[agent-loop] Nudge injected at ${subGoalSteps} iterations for sub-goal "${subGoalLabel}"`);
       }
 
       // Let the UI settle before the next observation
@@ -718,6 +751,236 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
     }
   }
 
-  // Max iterations reached
-  return { outcome: 'max_iterations', summary: `Reached ${maxIterations} iterations`, steps: maxIterations };
+  return { outcome: 'max_iterations', summary: `Sub-goal "${subGoalLabel}" reached iteration limit`, stepsUsed: subGoalSteps };
+}
+
+/**
+ * Run the autonomous agent loop.
+ *
+ * Observes the screen, sends observations to Claude, executes Claude's decisions.
+ * Repeats until the goal is achieved, max iterations reached, or an unrecoverable error.
+ *
+ * When `decompose` is true, the goal is broken into sub-goals first, and the loop
+ * iterates over each sub-goal sequentially with shared conversation history.
+ */
+export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopResult> {
+  const {
+    goal,
+    sendAndWait,
+    callbacks = {},
+    maxIterations = parseInt(process.env.AGENT_MAX_ITERATIONS || '25', 10),
+    settleDelayMs = 400,
+    decompose = false,
+    signal,
+  } = config;
+
+  // Global ceiling is the min of configured max and the absolute safety ceiling
+  const globalMax = Math.min(maxIterations, GLOBAL_ITERATION_CEILING);
+
+  log(`[agent-loop] Starting. Goal: "${goal.substring(0, 80)}". Max iterations: ${globalMax}. Decompose: ${decompose}`);
+
+  // Initialize LLM
+  try {
+    initLLMClient();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`[agent-loop] initLLMClient failed: ${msg}`);
+    callbacks.onError?.(msg, 'llm_init');
+    return { outcome: 'error', summary: `LLM initialization failed: ${msg}`, steps: 0 };
+  }
+  resetConversation();
+
+  // Goal-level state (carries forward across sub-goals)
+  const goalState = {
+    conversationHistory: [] as ConversationMessage[],
+    browserActive: false,
+    commandCounter: 0,
+    discoveredApps: new Set<string>(),
+    appFailures: {} as Record<string, number>,
+    skillInjectedApps: new Set<string>(),
+  };
+
+  // ---------------------------------------------------------------------------
+  // FLAT MODE (no decomposition) — backward-compatible path
+  // ---------------------------------------------------------------------------
+  if (!decompose) {
+    const result = await runSubGoalLoop(
+      goal, 'Main goal', goalState, sendAndWait, callbacks,
+      settleDelayMs, 0, globalMax, signal,
+    );
+
+    // Map inner result to AgentLoopResult
+    const outcome = result.outcome === 'stuck' ? 'max_iterations' as const : result.outcome;
+    return {
+      outcome,
+      summary: result.summary,
+      steps: result.stepsUsed,
+      question: result.question,
+      app: result.app,
+      discovery: result.discovery,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // DECOMPOSITION MODE — two-level sub-goal loop
+  // ---------------------------------------------------------------------------
+  log('[agent-loop] Decomposing goal into sub-goals...');
+  const decomposition = await decomposeTask(goal);
+
+  if (!decomposition.ok) {
+    log(`[agent-loop] Decomposition failed: ${decomposition.error}. Falling back to flat loop.`);
+    callbacks.onError?.(decomposition.error, 'decomposition');
+
+    const result = await runSubGoalLoop(
+      goal, 'Main goal', goalState, sendAndWait, callbacks,
+      settleDelayMs, 0, globalMax, signal,
+    );
+
+    const outcome = result.outcome === 'stuck' ? 'max_iterations' as const : result.outcome;
+    return {
+      outcome,
+      summary: result.summary,
+      steps: result.stepsUsed,
+      question: result.question,
+      app: result.app,
+      discovery: result.discovery,
+    };
+  }
+
+  const subGoals = decomposition.subGoals;
+  log(`[agent-loop] Decomposed into ${subGoals.length} sub-goals`);
+  callbacks.onDecomposition?.(subGoals);
+
+  const subGoalResults: SubGoalResult[] = [];
+  let totalSteps = 0;
+
+  for (let i = 0; i < subGoals.length; i++) {
+    const sg = subGoals[i];
+
+    // Check cancel before starting each sub-goal
+    if (signal?.aborted) {
+      // Mark remaining sub-goals as not started
+      for (let j = i; j < subGoals.length; j++) {
+        subGoalResults.push({ subGoal: subGoals[j], outcome: 'not_started' });
+      }
+      callbacks.onComplete?.('Cancelled by user', totalSteps);
+      return {
+        outcome: 'cancelled',
+        summary: `Cancelled after completing ${i} of ${subGoals.length} sub-goals`,
+        steps: totalSteps,
+        subGoalResults,
+      };
+    }
+
+    log(`[agent-loop] Starting sub-goal ${i + 1}/${subGoals.length}: "${sg.label}"`);
+    callbacks.onSubGoalStart?.(sg, i, subGoals.length);
+
+    // Summarize conversation from previous sub-goal at boundary
+    if (i > 0 && goalState.conversationHistory.length > 20) {
+      const prevSg = subGoals[i - 1];
+      const prevOutcome = subGoalResults[i - 1]?.outcome || 'complete';
+      goalState.conversationHistory.push({
+        role: 'user',
+        content: `[Sub-goal "${prevSg.label}" ${prevOutcome}. Moving to next sub-goal: "${sg.label}"]`,
+      });
+    }
+
+    const sgResult = await runSubGoalLoop(
+      sg.description, sg.label, goalState, sendAndWait, callbacks,
+      settleDelayMs, totalSteps, globalMax, signal,
+    );
+
+    totalSteps += sgResult.stepsUsed;
+
+    // Map inner outcome to SubGoalOutcome
+    let sgOutcome: SubGoalOutcome;
+    if (sgResult.outcome === 'complete') {
+      sgOutcome = 'complete';
+    } else if (sgResult.outcome === 'cancelled') {
+      sgOutcome = 'cancelled';
+    } else {
+      sgOutcome = 'stuck';
+    }
+
+    subGoalResults.push({ subGoal: sg, outcome: sgOutcome });
+    callbacks.onSubGoalComplete?.(sg, i, subGoals.length, sgOutcome);
+
+    log(`[agent-loop] Sub-goal ${i + 1}/${subGoals.length} "${sg.label}" -> ${sgOutcome} (${sgResult.stepsUsed} steps)`);
+
+    // Stop early on terminal outcomes
+    if (sgResult.outcome === 'needs_help') {
+      for (let j = i + 1; j < subGoals.length; j++) {
+        subGoalResults.push({ subGoal: subGoals[j], outcome: 'not_started' });
+      }
+      return {
+        outcome: 'needs_help',
+        summary: sgResult.summary,
+        steps: totalSteps,
+        question: sgResult.question,
+        subGoalResults,
+      };
+    }
+
+    if (sgResult.outcome === 'skill_generation_needed') {
+      for (let j = i + 1; j < subGoals.length; j++) {
+        subGoalResults.push({ subGoal: subGoals[j], outcome: 'not_started' });
+      }
+      return {
+        outcome: 'skill_generation_needed',
+        summary: sgResult.summary,
+        steps: totalSteps,
+        app: sgResult.app,
+        discovery: sgResult.discovery,
+        subGoalResults,
+      };
+    }
+
+    if (sgResult.outcome === 'error') {
+      for (let j = i + 1; j < subGoals.length; j++) {
+        subGoalResults.push({ subGoal: subGoals[j], outcome: 'not_started' });
+      }
+      return {
+        outcome: 'error',
+        summary: sgResult.summary,
+        steps: totalSteps,
+        subGoalResults,
+      };
+    }
+
+    if (sgResult.outcome === 'cancelled') {
+      for (let j = i + 1; j < subGoals.length; j++) {
+        subGoalResults.push({ subGoal: subGoals[j], outcome: 'not_started' });
+      }
+      return {
+        outcome: 'cancelled',
+        summary: `Cancelled during sub-goal "${sg.label}"`,
+        steps: totalSteps,
+        subGoalResults,
+      };
+    }
+
+    // For 'stuck' or 'max_iterations', continue to next sub-goal
+    // (the agent may make progress on the next one)
+  }
+
+  // All sub-goals processed
+  const completedCount = subGoalResults.filter(r => r.outcome === 'complete').length;
+  const allComplete = completedCount === subGoals.length;
+
+  if (allComplete) {
+    callbacks.onComplete?.(`All ${subGoals.length} sub-goals completed`, totalSteps);
+    return {
+      outcome: 'complete',
+      summary: `Completed all ${subGoals.length} sub-goals in ${totalSteps} steps`,
+      steps: totalSteps,
+      subGoalResults,
+    };
+  }
+
+  return {
+    outcome: 'partial_complete',
+    summary: `Completed ${completedCount} of ${subGoals.length} sub-goals in ${totalSteps} steps`,
+    steps: totalSteps,
+    subGoalResults,
+  };
 }

@@ -14,6 +14,7 @@ import type {
   ServerAgentStatus,
   ServerWorkflowProgress,
   ServerActionPreview,
+  ServerSubGoalProgress,
   ServerDebugLog,
   AgentWorkflowParsed,
   AgentRecordingError,
@@ -106,6 +107,21 @@ function handleMessage(message: WebSocketMessage): void {
           msg.currentStepName,
         );
       }
+      break;
+    }
+
+    case 'server_subgoal_progress': {
+      const msg = message as ServerSubGoalProgress;
+      const store = useChatStore.getState();
+      // Route sub-goal progress as an activity log entry
+      const statusLabel = msg.status === 'active' ? 'Starting' : msg.status === 'completed' ? 'Completed' : msg.status === 'failed' ? 'Failed' : msg.status === 'skipped' ? 'Skipped' : 'Pending';
+      store.addAgentLogEntry({
+        phase: msg.status === 'active' ? 'step' : msg.status === 'completed' ? 'complete' : msg.status === 'failed' ? 'error' : 'step',
+        step: msg.index + 1,
+        maxSteps: msg.total,
+        message: `Sub-goal ${msg.index + 1}/${msg.total}: ${statusLabel} — ${msg.subGoal.label}`,
+        timestamp: new Date().toISOString(),
+      });
       break;
     }
 

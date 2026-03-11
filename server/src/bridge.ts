@@ -39,6 +39,7 @@ import {
   ServerActionPreview,
   DashboardActionConfirm,
   DashboardActionCancel,
+  ServerSubGoalProgress,
   ServerDebugLog,
   WebSocketMessage,
   WorkflowDefinition,
@@ -59,6 +60,20 @@ if (!process.env.ANTHROPIC_API_KEY) {
 // Agent loop types (mirrored from local-agent to avoid cross-package TS imports)
 // ---------------------------------------------------------------------------
 
+interface SubGoal {
+  id: string;
+  label: string;
+  description: string;
+  app: string;
+}
+
+type SubGoalOutcome = 'complete' | 'stuck' | 'cancelled' | 'not_started';
+
+interface SubGoalResult {
+  subGoal: SubGoal;
+  outcome: SubGoalOutcome;
+}
+
 interface AgentLoopCallbacks {
   onStep?: (step: number, maxIterations: number) => void;
   onObservation?: (obs: unknown, step: number) => void;
@@ -69,6 +84,9 @@ interface AgentLoopCallbacks {
   onComplete?: (summary: string) => void;
   onNeedsHelp?: (question: string) => void;
   onError?: (error: string, context: string) => void;
+  onDecomposition?: (subGoals: SubGoal[]) => void;
+  onSubGoalStart?: (subGoal: SubGoal, index: number, total: number) => void;
+  onSubGoalComplete?: (subGoal: SubGoal, index: number, total: number, outcome: SubGoalOutcome) => void;
 }
 
 interface AgentLoopConfig {
@@ -76,6 +94,8 @@ interface AgentLoopConfig {
   sendAndWait: (cmd: AgentCommand) => Promise<AgentResult>;
   callbacks?: AgentLoopCallbacks;
   maxIterations?: number;
+  decompose?: boolean;
+  signal?: { aborted: boolean };
 }
 
 interface AgentLoopResult {
@@ -85,6 +105,7 @@ interface AgentLoopResult {
   question?: string;
   app?: string;
   discovery?: unknown;
+  subGoalResults?: SubGoalResult[];
 }
 
 // Agent loop imports (from local-agent package)
@@ -209,6 +230,7 @@ interface PendingActionPreview {
   plan: string;
   conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
   createdAt: number;
+  complexity: 'simple' | 'multi-step';
 }
 
 class Room {
@@ -222,6 +244,7 @@ class Room {
   private readonly _pendingWorkflowRequests = new Map<string, PendingWorkflowRequest>();
   private readonly _chatHistories = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
   private _pendingPreview: PendingActionPreview | null = null;
+  private _agentAbortSignal: { aborted: boolean } = { aborted: false };
 
   constructor(id: string) {
     this.id = id;
@@ -237,6 +260,9 @@ class Room {
   get chatHistories(): Map<string, Array<{ role: 'user' | 'assistant'; content: string }>> { return this._chatHistories; }
   get pendingPreview(): PendingActionPreview | null { return this._pendingPreview; }
   set pendingPreview(val: PendingActionPreview | null) { this._pendingPreview = val; }
+  get agentAbortSignal(): { aborted: boolean } { return this._agentAbortSignal; }
+  resetAbortSignal(): void { this._agentAbortSignal = { aborted: false }; }
+  abortAgent(): void { this._agentAbortSignal.aborted = true; }
 
   setAgentSocket(ws: WebSocket | null, info?: AgentInfo): void {
     this._agentSocket = ws;
@@ -545,6 +571,7 @@ interface ClassificationResult {
   intent: 'action' | 'conversation';
   plan: string;
   confidence: number;
+  complexity: 'simple' | 'multi-step';
 }
 
 const CLASSIFICATION_PROMPT = `You are a message classifier for a workflow automation agent. Your job is to determine whether a user's message is an actionable task request or a conversational message.
@@ -561,7 +588,11 @@ Rules:
 - Contextual references ("Send that to Tim", "Do it again") = action if context supports it
 
 Respond with ONLY a JSON object, no other text:
-{"intent": "action" | "conversation", "plan": "short description of what the agent will do (only for action intent, empty string for conversation)", "confidence": 0.0-1.0}`;
+{"intent": "action" | "conversation", "plan": "short description of what the agent will do (only for action intent, empty string for conversation)", "confidence": 0.0-1.0, "complexity": "simple" | "multi-step"}
+
+Complexity rules:
+- "simple": single-app, 1-3 steps (e.g. "open Chrome", "take a screenshot")
+- "multi-step": crosses apps, involves forms, requires multiple sequential actions (e.g. "send an email to Tim about the meeting", "schedule a meeting and email the agenda")`;
 
 async function classifyMessage(
   userMessage: string,
@@ -571,7 +602,7 @@ async function classifyMessage(
 ): Promise<ClassificationResult> {
   const client = getAnthropicClient();
   if (!client) {
-    return { intent: 'conversation', plan: '', confidence: 1.0 };
+    return { intent: 'conversation', plan: '', confidence: 1.0, complexity: 'simple' };
   }
 
   // Build context from recent conversation history (last 10 messages)
@@ -611,10 +642,13 @@ async function classifyMessage(
 
   // Validate the parsed result
   if (parsed.intent !== 'action' && parsed.intent !== 'conversation') {
-    return { intent: 'conversation', plan: '', confidence: 1.0 };
+    return { intent: 'conversation', plan: '', confidence: 1.0, complexity: 'simple' };
   }
   if (typeof parsed.confidence !== 'number' || parsed.confidence < 0 || parsed.confidence > 1) {
     parsed.confidence = 0.5;
+  }
+  if (parsed.complexity !== 'simple' && parsed.complexity !== 'multi-step') {
+    parsed.complexity = 'multi-step'; // default to decomposing when uncertain
   }
 
   return parsed;
@@ -819,6 +853,7 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
       plan: classification.plan,
       conversationHistory: [...history],
       createdAt: Date.now(),
+      complexity: classification.complexity,
     };
 
     const preview: ServerActionPreview = {
@@ -1023,9 +1058,10 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
   }
 
   // Clear pending preview and start execution
-  const { plan, originalMessage, conversationHistory } = pending;
+  const { plan, originalMessage, conversationHistory, complexity } = pending;
   room.pendingPreview = null;
   room.agentLoopActive = true;
+  room.resetAbortSignal();
 
   // Construct goal from plan + original message + conversation context
   const contextSummary = conversationHistory.length > 0
@@ -1067,10 +1103,17 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
 
     sendProgress('step', 'Starting agent loop...', `Goal: ${plan.substring(0, 100)}`);
 
+    const shouldDecompose = complexity === 'multi-step';
+    if (shouldDecompose) {
+      sendProgress('step', 'Decomposing task into sub-goals...', `Goal: ${plan.substring(0, 100)}`);
+    }
+
     const result = await runAgentLoop({
       goal,
       sendAndWait: (cmd) => room.sendCommandAndWait(cmd, commandTimeoutMs),
       maxIterations: maxIter,
+      decompose: shouldDecompose,
+      signal: room.agentAbortSignal,
       callbacks: {
         onStep: (step: number, maxIterations: number) => {
           currentStep = step;
@@ -1115,6 +1158,46 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
         },
         onError: (error: string, context: string) => {
           sendProgress('error', error, `Context: ${context}`);
+        },
+        onDecomposition: (subGoals: SubGoal[]) => {
+          sendDebugLog(room, 'info', 'agent-loop', `Decomposed into ${subGoals.length} sub-goals`, subGoals.map(sg => sg.label).join(', '));
+          // Send initial pending status for all sub-goals
+          for (let idx = 0; idx < subGoals.length; idx++) {
+            const sgProgress: ServerSubGoalProgress = {
+              type: 'server_subgoal_progress',
+              conversationId,
+              subGoal: { id: subGoals[idx].id, label: subGoals[idx].label },
+              index: idx,
+              total: subGoals.length,
+              status: 'pending',
+            };
+            room.sendToDashboard(sgProgress);
+          }
+        },
+        onSubGoalStart: (subGoal: SubGoal, index: number, total: number) => {
+          sendDebugLog(room, 'info', 'agent-loop', `Sub-goal ${index + 1}/${total}: "${subGoal.label}" started`);
+          const sgProgress: ServerSubGoalProgress = {
+            type: 'server_subgoal_progress',
+            conversationId,
+            subGoal: { id: subGoal.id, label: subGoal.label },
+            index,
+            total,
+            status: 'active',
+          };
+          room.sendToDashboard(sgProgress);
+        },
+        onSubGoalComplete: (subGoal: SubGoal, index: number, total: number, outcome: SubGoalOutcome) => {
+          sendDebugLog(room, 'info', 'agent-loop', `Sub-goal ${index + 1}/${total}: "${subGoal.label}" -> ${outcome}`);
+          const status = outcome === 'complete' ? 'completed' as const : outcome === 'stuck' ? 'failed' as const : 'skipped' as const;
+          const sgProgress: ServerSubGoalProgress = {
+            type: 'server_subgoal_progress',
+            conversationId,
+            subGoal: { id: subGoal.id, label: subGoal.label },
+            index,
+            total,
+            status,
+          };
+          room.sendToDashboard(sgProgress);
         },
       },
     });
@@ -1404,6 +1487,7 @@ async function main(): Promise<void> {
           const room = findRoomBySocket(ws);
           if (room) {
             logRoom(room.id, `Workflow cancel requested: ${(msg as DashboardWorkflowCancel).workflowId}`);
+            room.abortAgent();
           }
           break;
         }

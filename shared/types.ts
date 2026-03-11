@@ -743,6 +743,16 @@ export interface DashboardActionCancel {
 // Debug logging — pipeline visibility for dashboard + fly logs
 // ---------------------------------------------------------------------------
 
+/** Sub-goal progress from server to dashboard */
+export interface ServerSubGoalProgress {
+  type: 'server_subgoal_progress';
+  conversationId: string;
+  subGoal: { id: string; label: string };
+  index: number;
+  total: number;
+  status: 'pending' | 'active' | 'completed' | 'failed' | 'skipped';
+}
+
 /** Debug log entry pushed from bridge server to dashboard */
 export interface ServerDebugLog {
   type: 'server_debug_log';
@@ -770,7 +780,7 @@ export type WebSocketMessage =
   | AgentSkillUpload | AgentSkillListRequest
   | ServerSkillListResult | ServerSkillBroadcast
   | ServerActionPreview | DashboardActionConfirm | DashboardActionCancel
-  | ServerDebugLog;
+  | ServerSubGoalProgress | ServerDebugLog;
 
 // ---------------------------------------------------------------------------
 // Workflow Definition — structured, reusable workflows (moved from local-agent)

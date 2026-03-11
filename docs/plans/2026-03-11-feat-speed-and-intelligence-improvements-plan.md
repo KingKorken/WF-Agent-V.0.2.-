@@ -449,15 +449,15 @@ Check `signal.aborted` at the top of each iteration. Set it from bridge.ts when 
 
 ### Phase B Acceptance Criteria
 
-- [ ] **AC-B1:** Multi-step tasks produce a decomposition with N sub-goals before the main loop starts
-- [ ] **AC-B2:** Simple tasks bypass decomposition and run the existing loop behavior
-- [ ] **AC-B3:** Dashboard shows sub-goal progress with real-time updates via WebSocket
-- [ ] **AC-B4:** The agent does not exceed 100 iterations total across all sub-goals
-- [ ] **AC-B5:** Enhanced stuck detection fires: conversation injection at 10+ iterations on same sub-goal
-- [ ] **AC-B6:** `WorkflowProgress.tsx` hardcoded 77% is replaced with real data
-- [ ] **AC-B7:** Conversation history carries forward between sub-goals; stuck detection resets
-- [ ] **AC-B8:** Decomposition failure gracefully falls back to flat loop (no crash)
-- [ ] **AC-B9:** System prompt rebuilds per sub-goal (newly discovered skills are visible)
+- [x] **AC-B1:** Multi-step tasks produce a decomposition with N sub-goals before the main loop starts
+- [x] **AC-B2:** Simple tasks bypass decomposition and run the existing loop behavior
+- [x] **AC-B3:** Dashboard shows sub-goal progress with real-time updates via WebSocket
+- [x] **AC-B4:** The agent does not exceed 100 iterations total across all sub-goals
+- [x] **AC-B5:** Enhanced stuck detection fires: conversation injection at 10+ iterations on same sub-goal
+- [ ] **AC-B6:** `WorkflowProgress.tsx` hardcoded 77% is replaced with real data (deferred — polish)
+- [x] **AC-B7:** Conversation history carries forward between sub-goals; stuck detection resets
+- [x] **AC-B8:** Decomposition failure gracefully falls back to flat loop (no crash)
+- [x] **AC-B9:** System prompt rebuilds per sub-goal (newly discovered skills are visible)
 - [ ] **AC-B10:** Manual test: "Send email from Outlook" decomposes into ~5 sub-goals
 
 ### Phase B Files Modified (Reduced from 8 to 5)
