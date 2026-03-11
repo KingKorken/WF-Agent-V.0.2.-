@@ -30,11 +30,21 @@ export function buildSystemPrompt(): string {
 
 4. When reading data from files, ALWAYS use the file skill commands to read the ACTUAL file content. Never assume or "remember" data from files you created — always read from the user's real files.
 
-${buildSkillPromptSection()}${buildDiscoveredAppsPromptSection()}${buildLearnedActionsPromptSection()}### When to use skills vs UI:
-- Excel/Word file operations → ALWAYS use skills (Layer 1)
+${(() => {
+  const skillSection = buildSkillPromptSection();
+  const hasSkills = skillSection.length > 0;
+  const routing = hasSkills
+    ? `### When to use skills vs UI:
+- Apps with a registered skill (see FILE SKILLS above) → ALWAYS use the skill (Layer 1)
+- Opening files for the user to view → use shell/exec with "open" command (Layer 2)
+- Browser interactions → use CDP (Layer 3), fall back to vision (Layer 5)
+- Other desktop apps without skills → use accessibility (Layer 4), fall back to vision (Layer 5)`
+    : `### When to use skills vs UI:
 - Opening files for the user to view → use shell/exec with "open" command (Layer 2)
 - Browser interactions → use vision/accessibility (Layer 3-5)
-- Other desktop apps → use vision/accessibility (Layer 4-5)
+- Other desktop apps → use vision/accessibility (Layer 4-5)`;
+  return `${skillSection}${buildDiscoveredAppsPromptSection()}${buildLearnedActionsPromptSection()}${routing}`;
+})()}
 
 ## EFFICIENCY RULES
 

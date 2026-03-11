@@ -400,7 +400,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
     sendAndWait,
     callbacks = {},
     maxIterations = parseInt(process.env.AGENT_MAX_ITERATIONS || '25', 10),
-    settleDelayMs = 800,
+    settleDelayMs = 400,
   } = config;
 
   log(`[agent-loop] Starting. Goal: "${goal.substring(0, 80)}". Max iterations: ${maxIterations}`);
@@ -432,6 +432,9 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
   const actionHistory: ActionRecord[] = [];
   const stuckSignals: Record<string, number> = {};
 
+  // Track which apps have already had skill injection (prevents duplicate messages)
+  const skillInjectedApps = new Set<string>();
+
   for (let step = 1; step <= maxIterations; step++) {
     callbacks.onStep?.(step, maxIterations);
 
@@ -450,6 +453,23 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
     // === BUILD MESSAGE ===
     const userMessage = formatObservation(observation, goal, step);
     conversationHistory.push(userMessage);
+
+    // === SKILL INJECTION (after observation message, before DECIDE) ===
+    const currentApp = observation.frontmostApp;
+    if (currentApp && !skillInjectedApps.has(currentApp)) {
+      const appSkill = getSkillForApp(currentApp);
+      if (appSkill) {
+        skillInjectedApps.add(currentApp);
+        // Sanitize app name to alphanumeric + spaces only
+        const safeName = currentApp.replace(/[^a-zA-Z0-9 ]/g, '');
+        const cmds = appSkill.commands.map(c => c.name).join(', ');
+        conversationHistory.push({
+          role: 'user',
+          content: `SKILL AVAILABLE: The app "${safeName}" has a registered skill. Use the ${safeName} skill commands (${cmds}) instead of vision/accessibility for this app.`,
+        });
+        log(`[agent-loop] Injected skill reminder for "${safeName}" (commands: ${cmds})`);
+      }
+    }
 
     // === DECIDE ===
     callbacks.onThinking?.();

@@ -26,8 +26,8 @@ import { execFile } from 'child_process';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { log, error as logError } from '../../utils/logger';
 
-/** Timeout for JXA script execution (15 seconds) */
-const JXA_TIMEOUT_MS = 15_000;
+/** Timeout for JXA script execution (4s backstop — caller timeout at 3s wins, this cleans up the subprocess) */
+const JXA_TIMEOUT_MS = 4_000;
 
 /** Counter for unique JXA temp file names — prevents parallel calls from overwriting each other */
 let jxaCallCounter = 0;

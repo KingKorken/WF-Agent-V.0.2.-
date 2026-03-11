@@ -162,57 +162,76 @@ export async function getAppTree(appName: string, depth: number = 3): Promise<AX
 // Element Snapshot (interactive elements with actionable refs)
 // ---------------------------------------------------------------------------
 
+/** Timeout for AX element snapshot — most apps respond in <1s, 3s is generous */
+const AX_SNAPSHOT_TIMEOUT = 3000;
+
 /**
  * Get a flat list of interactive elements from an application.
  * Each element gets a ref ID (ax_1, ax_2, ...) that can be used in actions.
  * The ref→{windowIndex, flatIndex} mapping is persisted for action use.
  *
+ * Times out after 3s and resolves with { success: false } (error-as-value pattern).
+ *
  * @param appName - The application name
  */
 export async function getElementSnapshot(appName: string): Promise<AXSnapshotResult> {
-  try {
-    log(`[${timestamp()}] [ax-tree] Getting element snapshot for "${appName}"`);
+  log(`[${timestamp()}] [ax-tree] Getting element snapshot for "${appName}"`);
 
-    const rawElements: RawInteractiveElement[] = await getInteractiveElements(appName);
+  const timeoutPromise = new Promise<AXSnapshotResult>((resolve) =>
+    setTimeout(
+      () => {
+        log(`[${timestamp()}] [ax-tree] Snapshot timed out after ${AX_SNAPSHOT_TIMEOUT}ms`);
+        resolve({ success: false, error: `Snapshot timed out after ${AX_SNAPSHOT_TIMEOUT}ms` });
+      },
+      AX_SNAPSHOT_TIMEOUT,
+    )
+  );
 
-    // Reset the mapping for this session
-    refToFlat = new Map();
-    snapshotAppName = appName;
+  const snapshotPromise = (async (): Promise<AXSnapshotResult> => {
+    try {
+      const rawElements: RawInteractiveElement[] = await getInteractiveElements(appName);
 
-    const elements: AXSnapshotElement[] = rawElements.map((raw, i) => {
-      const ref = `ax_${i + 1}`;
+      // Reset the mapping for this session
+      refToFlat = new Map();
+      snapshotAppName = appName;
 
-      // Store flat index mapping for action use
-      refToFlat.set(ref, {
-        appName,
-        windowIndex: raw.windowIndex,
-        flatIndex: raw.flatIndex,
+      const elements: AXSnapshotElement[] = rawElements.map((raw, i) => {
+        const ref = `ax_${i + 1}`;
+
+        // Store flat index mapping for action use
+        refToFlat.set(ref, {
+          appName,
+          windowIndex: raw.windowIndex,
+          flatIndex: raw.flatIndex,
+        });
+
+        return {
+          ref,
+          role: raw.role,
+          label: raw.label,
+          value: raw.value,
+          enabled: raw.enabled,
+          windowIndex: raw.windowIndex,
+          flatIndex: raw.flatIndex,
+        };
       });
 
+      log(`[${timestamp()}] [ax-tree] Found ${elements.length} interactive elements`);
+
       return {
-        ref,
-        role: raw.role,
-        label: raw.label,
-        value: raw.value,
-        enabled: raw.enabled,
-        windowIndex: raw.windowIndex,
-        flatIndex: raw.flatIndex,
+        success: true,
+        app: appName,
+        elements,
+        count: elements.length,
       };
-    });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logError(`[${timestamp()}] [ax-tree] Snapshot failed: ${message}`);
+      return { success: false, error: message };
+    }
+  })();
 
-    log(`[${timestamp()}] [ax-tree] Found ${elements.length} interactive elements`);
-
-    return {
-      success: true,
-      app: appName,
-      elements,
-      count: elements.length,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logError(`[${timestamp()}] [ax-tree] Snapshot failed: ${message}`);
-    return { success: false, error: message };
-  }
+  return Promise.race([snapshotPromise, timeoutPromise]);
 }
 
 // ---------------------------------------------------------------------------

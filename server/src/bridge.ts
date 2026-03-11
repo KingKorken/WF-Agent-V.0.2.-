@@ -911,7 +911,7 @@ async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise
   }
 
   try {
-    const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '10', 10);
+    const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '25', 10);
     const commandTimeoutMs = parseInt(process.env.AGENT_COMMAND_TIMEOUT || '60000', 10);
     const result = await runAgentLoop!({
       goal,
@@ -1063,7 +1063,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
   const commandTimeoutMs = parseInt(process.env.AGENT_COMMAND_TIMEOUT || '60000', 10);
 
   try {
-    const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '10', 10);
+    const maxIter = parseInt(process.env.AGENT_MAX_ITERATIONS || '25', 10);
 
     sendProgress('step', 'Starting agent loop...', `Goal: ${plan.substring(0, 100)}`);
 
