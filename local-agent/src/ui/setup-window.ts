@@ -8,14 +8,14 @@
  * Security: Uses contextIsolation + preload script (no nodeIntegration).
  */
 
-import { BrowserWindow, ipcMain, IpcMainEvent, shell, systemPreferences } from 'electron';
+import { BrowserWindow, app, ipcMain, IpcMainEvent, shell, systemPreferences } from 'electron';
+import * as path from 'path';
 import WebSocket from 'ws';
 import { log } from '../utils/logger';
 import { saveConfig } from '../utils/config';
 import { startConnection } from '../main';
 import { BRIDGE_URL } from '../build-config';
 import { checkRequiredPermissions } from '../platform/permissions';
-import { getResourcePath } from '../utils/app-paths';
 
 type IpcHandler = (event: IpcMainEvent, ...args: unknown[]) => void;
 
@@ -51,10 +51,14 @@ export function showSetupWindow(): void {
     return;
   }
 
-  // Use getResourcePath() for asar-safe path resolution in packaged builds.
-  // __dirname resolves inside the .asar archive which breaks preload scripts.
-  const preloadPath = getResourcePath('dist/src/ui/setup-preload.js');
-  const htmlPath = getResourcePath('dist/src/ui/setup.html');
+  // Use app.getAppPath() for path resolution that works in both dev and packaged builds.
+  // In dev:      app.getAppPath() → local-agent/
+  // In packaged: app.getAppPath() → Contents/Resources/app.asar (Electron reads from asar transparently)
+  // NOTE: Do NOT use process.resourcesPath — that points outside the asar where these files don't exist.
+  const appRoot = app.getAppPath();
+  const preloadPath = path.join(appRoot, 'dist/src/ui/setup-preload.js');
+  const htmlPath = path.join(appRoot, 'dist/src/ui/setup.html');
+  log(`[setup] App root: ${appRoot}`);
   log(`[setup] Preload path: ${preloadPath}`);
   log(`[setup] HTML path: ${htmlPath}`);
 
