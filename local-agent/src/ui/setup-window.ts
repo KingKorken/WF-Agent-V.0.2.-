@@ -79,18 +79,34 @@ export function showSetupWindow(): void {
     },
   });
 
+  // Safety net: if ready-to-show never fires (e.g. loadFile fails silently),
+  // force-show the window after 3 seconds so it's never permanently invisible.
+  const forceShowTimeout = setTimeout(() => {
+    if (setupWindow && !setupWindow.isVisible()) {
+      log('[setup] Force-showing window (ready-to-show did not fire within 3s)');
+      setupWindow.show();
+      setupWindow.focus();
+    }
+  }, 3000);
+
   // Show window once content is ready (prevents blank flash)
   setupWindow.once('ready-to-show', () => {
+    clearTimeout(forceShowTimeout);
     log('[setup] Window ready — showing');
     setupWindow?.show();
+    setupWindow?.focus();
   });
 
   // Load the setup HTML page
   setupWindow.loadFile(htmlPath);
 
-  // Log load failures for debugging
+  // Log load failures and force-show so the user at least sees something
   setupWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
     log(`[setup] Failed to load HTML (${errorCode}): ${errorDescription}`);
+    log(`[setup] Attempted path: ${htmlPath}`);
+    if (setupWindow && !setupWindow.isVisible()) {
+      setupWindow.show();
+    }
   });
 
   // Clean up IPC handlers AND window reference on close (B2 fix)

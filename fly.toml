@@ -13,7 +13,6 @@ primary_region = 'fra'
   destination = '/data'
 
 [env]
-  AGENT_MODULES_PATH = '/nonexistent'
   DATA_DIR = '/data'
   NODE_ENV = 'production'
   PORT = '8765'
