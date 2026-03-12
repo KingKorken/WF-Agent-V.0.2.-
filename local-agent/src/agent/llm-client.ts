@@ -50,8 +50,8 @@ let client: Anthropic | null = null;
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TOKENS = 4096;
-const MAX_RETRIES = 3;
-const RETRY_DELAYS_SEC = [5, 10, 20];
+const MAX_RETRIES = 6;
+const RETRY_DELAYS_SEC = [5, 10, 20, 30, 45, 60];
 const RECENT_TURNS_TO_KEEP = 6; // keep last 3 pairs (user+assistant) with full images — reduced from 10 to cut 40% of image tokens
 
 // ---------------------------------------------------------------------------
@@ -254,9 +254,18 @@ export async function sendMessageWithMeta(
       }
 
       const message = err instanceof Error ? err.message : String(err);
-      logError(`[llm-client] API call failed: ${message}`);
+      const isOverloaded = statusCode === 529;
+      const isRateLimited = statusCode === 429;
+      logError(`[llm-client] API call failed after ${attempt + 1} attempts: ${message}`);
       return {
-        text: JSON.stringify({ status: 'error', error: `API call failed: ${message}` }),
+        text: JSON.stringify({
+          status: 'error',
+          error: `API call failed: ${message}`,
+          apiError: true,
+          overloaded: isOverloaded,
+          rateLimited: isRateLimited,
+          statusCode,
+        }),
         truncated: false,
         inputTokens: 0,
         outputTokens: 0,

@@ -511,12 +511,14 @@ async function runSubGoalLoop(
   signal?: { aborted: boolean },
 ): Promise<{ outcome: 'complete' | 'needs_help' | 'stuck' | 'max_iterations' | 'error' | 'cancelled' | 'skill_generation_needed'; summary: string; stepsUsed: number; question?: string; app?: string; discovery?: DiscoveryResult }> {
   const MAX_CONSECUTIVE_ERRORS = 3;
+  const MAX_CONSECUTIVE_API_RETRIES = 5;
   const DISCOVERY_THRESHOLD = 3;
 
   // Per-sub-goal state (resets for each sub-goal)
   const actionHistory: ActionRecord[] = [];
   const stuckSignals: Record<string, number> = {};
   let consecutiveErrors = 0;
+  let consecutiveApiRetries = 0;
   let subGoalSteps = 0;
   let lastObservation: Observation | undefined;
   let reuseScreenshot = false;
@@ -621,6 +623,37 @@ async function runSubGoalLoop(
       callbacks.onError?.(msg, 'llm');
       return { outcome: 'error', summary: `LLM call failed: ${msg}`, stepsUsed: subGoalSteps };
     }
+
+    // --- Handle: API error (overloaded/rate-limited) ---
+    // Detect API errors BEFORE adding to conversation history, so we can
+    // retry cleanly without polluting the context with error JSON.
+    try {
+      const maybeError = JSON.parse(responseText);
+      if (maybeError?.apiError === true) {
+        consecutiveApiRetries++;
+        if (consecutiveApiRetries >= MAX_CONSECUTIVE_API_RETRIES) {
+          log(`[agent-loop] API error persisted for ${consecutiveApiRetries} retries — giving up`);
+          callbacks.onError?.(maybeError.error, `api_exhausted (${consecutiveApiRetries} retries)`);
+          return {
+            outcome: 'error',
+            summary: `API unavailable after ${consecutiveApiRetries} retries: ${maybeError.error}`,
+            stepsUsed: subGoalSteps,
+          };
+        }
+        const isOverloaded = maybeError.overloaded === true;
+        const waitSec = isOverloaded ? 30 : 15;
+        log(`[agent-loop] API ${isOverloaded ? 'overloaded' : 'error'} — waiting ${waitSec}s before retry ${consecutiveApiRetries}/${MAX_CONSECUTIVE_API_RETRIES} (does NOT count as parse error)`);
+        callbacks.onError?.(maybeError.error, `api_retry ${consecutiveApiRetries}/${MAX_CONSECUTIVE_API_RETRIES} (waiting ${waitSec}s)`);
+        await new Promise<void>((resolve) => setTimeout(resolve, waitSec * 1000));
+        // Do NOT push this into conversation history — retry from the same state
+        // Do NOT increment consecutiveErrors — this is an infra issue, not a model issue
+        continue;
+      }
+    } catch {
+      // Not JSON at all — that's fine, will be handled by parseResponse below
+    }
+    // API succeeded — reset the API retry counter
+    consecutiveApiRetries = 0;
 
     goalState.conversationHistory.push({ role: 'assistant', content: responseText });
 
