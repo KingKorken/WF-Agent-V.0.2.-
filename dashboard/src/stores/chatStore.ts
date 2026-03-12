@@ -66,6 +66,7 @@ interface ChatState {
   resetTypingState: () => void;
   confirmAction: (previewId: string, conversationId: string) => void;
   cancelAction: (previewId: string, conversationId: string) => void;
+  cancelTask: () => void;
 }
 
 function generateId(): string {
@@ -298,6 +299,14 @@ export const useChatStore = create<ChatState>((set, get) => {
             : c
         ),
       }));
+    },
+
+    cancelTask: () => {
+      const { activeConversationId } = get();
+      wsService.send({
+        type: 'dashboard_cancel_task',
+        conversationId: activeConversationId,
+      });
     },
   };
 });

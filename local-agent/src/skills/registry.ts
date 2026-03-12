@@ -57,7 +57,7 @@ export interface DiscoveredApp {
 /** A successfully executed action the agent learned for an app. */
 export interface LearnedAction {
   /** What type of action this is */
-  type: 'shell' | 'cdp' | 'accessibility';
+  type: 'shell' | 'cdp' | 'accessibility' | 'vision';
   /** The app this action was used with */
   app: string;
   /** What this action does (from agent's thinking) */
@@ -90,6 +90,14 @@ export interface LearnedAction {
   menuPath?: string[];
   /** Value that was set (only for set_value) */
   setValue?: string;
+
+  // --- Vision-specific fields ---
+  /** The vision action: click_coordinates, type_text, key_combo */
+  visionAction?: string;
+  /** The window title when this action was taken */
+  windowTitle?: string;
+  /** Key combo string for key_combo actions (e.g. "cmd+n") */
+  keys?: string;
 }
 
 /** @deprecated Use LearnedAction instead */
@@ -140,12 +148,25 @@ function ensureLoaded(): void {
   loaded = true;
 }
 
+/** Debounce timer for learned action writes */
+let registryDirtyTimer: ReturnType<typeof setTimeout> | null = null;
+const REGISTRY_DEBOUNCE_MS = 500;
+
 /** Write registry to disk using write-then-rename for safety. */
 function persistRegistry(): void {
   const data: RegistryFile = { skills, discovered, learnedCommands };
   const tmpPath = REGISTRY_PATH + '.tmp';
   fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2) + '\n', 'utf8');
   fs.renameSync(tmpPath, REGISTRY_PATH);
+}
+
+/** Debounced persist — batches rapid learned action writes within 500ms. */
+function persistRegistryDebounced(): void {
+  if (registryDirtyTimer) clearTimeout(registryDirtyTimer);
+  registryDirtyTimer = setTimeout(() => {
+    registryDirtyTimer = null;
+    persistRegistry();
+  }, REGISTRY_DEBOUNCE_MS);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +190,7 @@ export function getAllSkills(): SkillEntry[] {
 }
 
 /** Resolve the full filesystem path for a skill's executable. */
-function resolveSkillPath(entry: SkillEntry): string {
+export function resolveSkillPath(entry: SkillEntry): string {
   const base = entry.skillsDir === 'dist' ? SKILLS_DIST_DIR : SKILLS_DIR;
   return path.join(base, entry.file);
 }
@@ -328,6 +349,8 @@ function actionsMatch(a: LearnedAction, b: LearnedAction): boolean {
       return a.url === b.url && a.cdpAction === b.cdpAction && a.elementLabel === b.elementLabel;
     case 'accessibility':
       return a.axAction === b.axAction && a.elementLabel === b.elementLabel;
+    case 'vision':
+      return a.visionAction === b.visionAction && a.description === b.description;
     default:
       return false;
   }
@@ -374,7 +397,7 @@ export function saveLearnedAction(action: LearnedAction): void {
     learnedCommands.push(action);
     enforceActionLimit(action.app);
   }
-  persistRegistry();
+  persistRegistryDebounced();
 }
 
 /** @deprecated Use saveLearnedAction instead */
@@ -409,7 +432,7 @@ export function incrementActionUseCount(appName: string, action: LearnedAction):
   if (entry) {
     entry.useCount += 1;
     entry.learnedAt = new Date().toISOString();
-    persistRegistry();
+    persistRegistryDebounced();
   }
 }
 
@@ -460,6 +483,16 @@ function formatActionForPrompt(action: LearnedAction): string {
       }
       return `- ${action.description}: ${detail}${useSuffix}`;
     }
+    case 'vision': {
+      let detail = action.visionAction || 'action';
+      if (action.windowTitle) {
+        detail += ` in "${action.windowTitle}"`;
+      }
+      if (action.keys) {
+        detail += ` keys=${action.keys}`;
+      }
+      return `- ${action.description}: ${detail}${useSuffix}`;
+    }
     default:
       return `- ${action.description}${useSuffix}`;
   }
@@ -489,6 +522,7 @@ export function buildLearnedActionsPromptSection(): string {
     const shellActions = actions.filter(a => a.type === 'shell');
     const cdpActions = actions.filter(a => a.type === 'cdp');
     const axActions = actions.filter(a => a.type === 'accessibility');
+    const visionActions = actions.filter(a => a.type === 'vision');
 
     if (shellActions.length > 0) {
       out += `### ${app} (shell):\n`;
@@ -513,6 +547,11 @@ export function buildLearnedActionsPromptSection(): string {
     if (axActions.length > 0) {
       out += `### ${app} (desktop):\n`;
       for (const a of axActions) out += formatActionForPrompt(a) + '\n';
+      out += '\n';
+    }
+    if (visionActions.length > 0) {
+      out += `### ${app} (vision):\n`;
+      for (const a of visionActions) out += formatActionForPrompt(a) + '\n';
       out += '\n';
     }
   }

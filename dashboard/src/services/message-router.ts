@@ -16,6 +16,7 @@ import type {
   ServerActionPreview,
   ServerSubGoalProgress,
   ServerDebugLog,
+  ServerCancelAck,
   AgentWorkflowParsed,
   AgentRecordingError,
   AgentWorkflowList,
@@ -122,6 +123,23 @@ function handleMessage(message: WebSocketMessage): void {
         message: `Sub-goal ${msg.index + 1}/${msg.total}: ${statusLabel} — ${msg.subGoal.label}`,
         timestamp: new Date().toISOString(),
       });
+      break;
+    }
+
+    case 'server_cancel_ack': {
+      const msg = message as ServerCancelAck;
+      const store = useChatStore.getState();
+      const completedList = msg.completedSubGoals.length > 0
+        ? `Completed: ${msg.completedSubGoals.join(', ')}`
+        : 'No sub-goals were completed.';
+      store.receiveMessage(msg.conversationId, {
+        id: `cancel_ack_${Date.now()}`,
+        role: 'system',
+        type: 'text',
+        content: `Task cancelled. ${completedList}`,
+        timestamp: new Date(),
+      });
+      store.resetTypingState();
       break;
     }
 

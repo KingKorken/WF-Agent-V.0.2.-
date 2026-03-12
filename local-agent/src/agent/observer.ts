@@ -79,15 +79,27 @@ function nextObsId(): string {
 // Main export
 // ---------------------------------------------------------------------------
 
+/** Options for controlling observation behavior */
+export interface ObserveOptions {
+  /** Apps where AX snapshot is known to fail — skip AX for these */
+  axFailedApps?: Set<string>;
+  /** If provided and the last action definitively failed pre-execution, reuse this observation's screenshot */
+  previousObservation?: Observation;
+  /** Whether the last action was a definitive pre-execution failure (safe to reuse screenshot) */
+  reuseScreenshot?: boolean;
+}
+
 /**
  * Gather the full observation for one agent loop step.
  *
  * @param sendAndWait     - Async function to send a command and await its result
  * @param isBrowserActive - Whether the CDP browser layer is currently open
+ * @param options         - Optional: AX failure tracking and screenshot reuse
  */
 export async function observe(
   sendAndWait: SendAndWait,
-  isBrowserActive: boolean
+  isBrowserActive: boolean,
+  options?: ObserveOptions,
 ): Promise<Observation> {
   log('[observer] Collecting observation...');
 
@@ -104,32 +116,39 @@ export async function observe(
   let availableLayer: Observation['availableLayer'] = 'vision-only';
 
   // --- Step 1: Screenshot ---------------------------------------------------
-  try {
-    const result = await sendAndWait({
-      type: 'command',
-      id: nextObsId(),
-      layer: 'vision',
-      action: 'screenshot',
-      params: {},
-    });
-    if (result.status === 'success' && result.data.base64) {
-      const raw = result.data.base64 as string;
-      screenshotSize = {
-        width: (result.data.width as number) || 0,
-        height: (result.data.height as number) || 0,
-      };
+  // Reuse previous screenshot if last action was a definitive pre-execution failure
+  if (options?.reuseScreenshot && options?.previousObservation) {
+    screenshot = options.previousObservation.screenshot;
+    screenshotSize = options.previousObservation.screenshotSize;
+    log(`[observer] Reusing previous screenshot (last action failed pre-execution)`);
+  } else {
+    try {
+      const result = await sendAndWait({
+        type: 'command',
+        id: nextObsId(),
+        layer: 'vision',
+        action: 'screenshot',
+        params: {},
+      });
+      if (result.status === 'success' && result.data.base64) {
+        const raw = result.data.base64 as string;
+        screenshotSize = {
+          width: (result.data.width as number) || 0,
+          height: (result.data.height as number) || 0,
+        };
 
-      // Validate screenshot — reject empty or too-small images
-      const MIN_SCREENSHOT_BYTES = 1000;
-      if (raw.length >= MIN_SCREENSHOT_BYTES) {
-        screenshot = raw;
-        log(`[observer] Screenshot: ${screenshotSize.width}×${screenshotSize.height}`);
-      } else {
-        log(`[observer] WARNING: Screenshot is empty or too small (${raw.length} bytes), skipping image`);
+        // Validate screenshot — reject empty or too-small images
+        const MIN_SCREENSHOT_BYTES = 1000;
+        if (raw.length >= MIN_SCREENSHOT_BYTES) {
+          screenshot = raw;
+          log(`[observer] Screenshot: ${screenshotSize.width}×${screenshotSize.height}`);
+        } else {
+          log(`[observer] WARNING: Screenshot is empty or too small (${raw.length} bytes), skipping image`);
+        }
       }
+    } catch (err) {
+      logError(`[observer] Screenshot failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  } catch (err) {
-    logError(`[observer] Screenshot failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // --- Step 2: Window metadata via collect_context (lightweight — no screenshot, no AX) ---
@@ -222,29 +241,40 @@ export async function observe(
     }
   }
 
-  // Try accessibility snapshot if no browser elements
+  // Try accessibility snapshot if no browser elements (skip for known-failing apps)
+  const axFailed = options?.axFailedApps;
   if (browserElements === null && frontmostApp) {
-    try {
-      const axResult = await sendAndWait({
-        type: 'command',
-        id: nextObsId(),
-        layer: 'accessibility',
-        action: 'snapshot',
-        params: { app: frontmostApp },
-      });
-      if (axResult.status === 'success' && Array.isArray(axResult.data.elements)) {
-        desktopElements = (axResult.data.elements as Array<Record<string, unknown>>).map((el) => ({
-          ref: String(el.ref || ''),
-          role: String(el.role || ''),
-          label: String(el.label || ''),
-          value: String(el.value || ''),
-          enabled: el.enabled !== false,
-        }));
-        availableLayer = 'accessibility';
-        log(`[observer] AX snapshot: ${desktopElements.length} elements`);
+    if (axFailed?.has(frontmostApp)) {
+      log(`[observer] Skipping AX snapshot for "${frontmostApp}" (previously failed)`);
+    } else {
+      try {
+        const axResult = await sendAndWait({
+          type: 'command',
+          id: nextObsId(),
+          layer: 'accessibility',
+          action: 'snapshot',
+          params: { app: frontmostApp },
+        });
+        if (axResult.status === 'success' && Array.isArray(axResult.data.elements)) {
+          desktopElements = (axResult.data.elements as Array<Record<string, unknown>>).map((el) => ({
+            ref: String(el.ref || ''),
+            role: String(el.role || ''),
+            label: String(el.label || ''),
+            value: String(el.value || ''),
+            enabled: el.enabled !== false,
+          }));
+          availableLayer = 'accessibility';
+          log(`[observer] AX snapshot: ${desktopElements.length} elements`);
+        } else if (axResult.status === 'error') {
+          // AX failed — record for future skipping
+          axFailed?.add(frontmostApp);
+          log(`[observer] AX snapshot failed for "${frontmostApp}" — added to axFailedApps`);
+        }
+      } catch (err) {
+        // AX threw — record for future skipping
+        axFailed?.add(frontmostApp);
+        logError(`[observer] AX snapshot failed: ${err instanceof Error ? err.message : String(err)} — added to axFailedApps`);
       }
-    } catch (err) {
-      logError(`[observer] AX snapshot failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

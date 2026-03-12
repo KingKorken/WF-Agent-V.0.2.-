@@ -16,11 +16,12 @@
  *   });
  */
 
+import { execFile } from 'child_process';
 import { AgentCommand, AgentResult } from '@workflow-agent/shared';
 import { initLLMClient, sendMessage, resetConversation } from './llm-client';
 import type { ConversationMessage } from './llm-client';
 import { observe } from './observer';
-import type { Observation } from './observer';
+import type { Observation, ObserveOptions } from './observer';
 import { buildSystemPrompt, formatObservation } from './prompt-builder';
 import { parseResponse } from './response-parser';
 import type { ParsedResponse } from './response-parser';
@@ -36,7 +37,7 @@ import type { LearnedAction } from '../skills/registry';
 import { discoverAppCapabilities } from '../skills/discovery';
 import type { DiscoveryResult } from '../skills/discovery';
 import { decomposeTask } from './task-decomposer';
-import type { SubGoal, SubGoalResult, SubGoalOutcome } from './task-decomposer';
+import type { SubGoal, SubGoalResult, SubGoalOutcome, SkillCommandRef } from './task-decomposer';
 
 // ---------------------------------------------------------------------------
 // Learned action helpers
@@ -89,8 +90,9 @@ function formatActionHint(action: LearnedAction): string {
 }
 
 /**
- * Capture a successful action as a learned action (shell, CDP, or accessibility).
+ * Capture a successful action as a learned action (shell, CDP, accessibility, or vision).
  * Only captures actions worth remembering across sessions.
+ * Stores semantic descriptions, not raw pixel coordinates.
  */
 function captureLearnedAction(
   parsed: ParsedResponse & { type: 'action' },
@@ -121,6 +123,23 @@ function captureLearnedAction(
       });
       log(`[agent-loop] Learned shell action for "${appName}": ${command.substring(0, 80)}`);
     }
+    return;
+  }
+
+  // --- Shell/launch_app, shell/switch_app ---
+  if (cmd.layer === 'shell' && (cmd.action === 'launch_app' || cmd.action === 'switch_app')) {
+    const appName = (cmd.params.appName as string) || (cmd.params.app as string) || '';
+    if (!appName) return;
+
+    saveLearnedAction({
+      type: 'shell',
+      app: appName,
+      command: cmd.action === 'launch_app' ? `open -a "${appName}"` : `osascript -e 'tell application "${appName}" to activate'`,
+      description: cmd.action === 'launch_app' ? `Launch ${appName}` : `Switch to ${appName}`,
+      learnedAt: new Date().toISOString(),
+      useCount: 1,
+    });
+    log(`[agent-loop] Learned ${cmd.action} for "${appName}"`);
     return;
   }
 
@@ -186,6 +205,26 @@ function captureLearnedAction(
       learnedAt: new Date().toISOString(),
       useCount: 1,
     });
+    return;
+  }
+
+  // --- Vision: save click_coordinates, type_text, key_combo ---
+  // Stores semantic descriptions only — NOT raw pixel coordinates (fragile across sessions)
+  if (cmd.layer === 'vision' && ['click_coordinates', 'type_text', 'key_combo'].includes(cmd.action)) {
+    const appName = observation.frontmostApp;
+    const winTitle = observation.windowTitle || '';
+
+    saveLearnedAction({
+      type: 'vision',
+      app: appName,
+      visionAction: cmd.action,
+      windowTitle: winTitle,
+      keys: cmd.action === 'key_combo' ? (cmd.params.keys as string) : undefined,
+      description: extractDescription(parsed.thinking),
+      learnedAt: new Date().toISOString(),
+      useCount: 1,
+    });
+    log(`[agent-loop] Learned vision/${cmd.action} for "${appName}": ${extractDescription(parsed.thinking).substring(0, 60)}`);
     return;
   }
 }
@@ -409,6 +448,36 @@ export function formatActionResult(command: AgentCommand, result: AgentResult): 
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Skill execution helper
+// ---------------------------------------------------------------------------
+
+const SKILL_TIMEOUT_MS = 30_000;
+
+/**
+ * Execute a skill command directly via execFile.
+ * Returns { success, output, error } — no observe-decide-act loop.
+ */
+function executeSkillCommand(
+  cmd: SkillCommandRef,
+): Promise<{ success: boolean; output: string; error?: string }> {
+  return new Promise((resolve) => {
+    const args = [cmd.skillPath, cmd.command, ...cmd.args];
+    log(`[agent-loop] Executing skill: ${cmd.runtime} ${args.join(' ')}`);
+
+    execFile(cmd.runtime, args, { timeout: SKILL_TIMEOUT_MS }, (err, stdout, stderr) => {
+      if (err) {
+        const errMsg = stderr || err.message;
+        log(`[agent-loop] Skill execution failed: ${errMsg}`);
+        resolve({ success: false, output: stdout || '', error: errMsg });
+      } else {
+        log(`[agent-loop] Skill execution succeeded: ${(stdout || '').substring(0, 100)}`);
+        resolve({ success: true, output: stdout || '' });
+      }
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Sub-goal iteration budget & global ceiling
 // ---------------------------------------------------------------------------
 
@@ -431,7 +500,8 @@ async function runSubGoalLoop(
     commandCounter: number;
     discoveredApps: Set<string>;
     appFailures: Record<string, number>;
-    skillInjectedApps: Set<string>;
+    axFailedApps: Set<string>;
+    knowledgeInjectedApps: Set<string>;
   },
   sendAndWait: SendAndWait,
   callbacks: AgentLoopCallbacks,
@@ -448,6 +518,10 @@ async function runSubGoalLoop(
   const stuckSignals: Record<string, number> = {};
   let consecutiveErrors = 0;
   let subGoalSteps = 0;
+  let lastObservation: Observation | undefined;
+  let reuseScreenshot = false;
+  let actionAttemptCount = 0;
+  let successfulActionCount = 0;
 
   // Rebuild system prompt at sub-goal start (picks up newly discovered skills)
   const systemPrompt = buildSystemPrompt();
@@ -471,33 +545,69 @@ async function runSubGoalLoop(
 
     // === OBSERVE ===
     let observation: Observation;
+    const observeOpts: ObserveOptions = {
+      axFailedApps: goalState.axFailedApps,
+      previousObservation: lastObservation,
+      reuseScreenshot,
+    };
     try {
-      observation = await observe(sendAndWait, goalState.browserActive);
+      observation = await observe(sendAndWait, goalState.browserActive, observeOpts);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       callbacks.onError?.(msg, 'observation');
       return { outcome: 'error', summary: `Observation failed: ${msg}`, stepsUsed: subGoalSteps };
     }
+    lastObservation = observation;
+    reuseScreenshot = false; // Reset — only reuse once after a pre-execution failure
+
+    // Check cancel after observe
+    if (signal?.aborted) {
+      return { outcome: 'cancelled', summary: 'Cancelled by user', stepsUsed: subGoalSteps };
+    }
 
     callbacks.onObservation?.(observation, step);
 
     // === BUILD MESSAGE ===
-    const userMessage = formatObservation(observation, subGoalDescription, step);
+    const stepsRemaining = maxGlobalSteps - step;
+    const userMessage = formatObservation(observation, subGoalDescription, step, {
+      maxSteps: maxGlobalSteps,
+      remaining: stepsRemaining,
+    });
     goalState.conversationHistory.push(userMessage);
 
-    // === SKILL INJECTION ===
+    // === KNOWLEDGE INJECTION (skills + learned actions) ===
     const currentApp = observation.frontmostApp;
-    if (currentApp && !goalState.skillInjectedApps.has(currentApp)) {
+    if (currentApp && !goalState.knowledgeInjectedApps.has(currentApp)) {
+      goalState.knowledgeInjectedApps.add(currentApp);
+      const safeName = currentApp.replace(/[^a-zA-Z0-9 ]/g, '');
+
+      // Inject registered skill if available
       const appSkill = getSkillForApp(currentApp);
       if (appSkill) {
-        goalState.skillInjectedApps.add(currentApp);
-        const safeName = currentApp.replace(/[^a-zA-Z0-9 ]/g, '');
         const cmds = appSkill.commands.map(c => c.name).join(', ');
         goalState.conversationHistory.push({
           role: 'user',
           content: `SKILL AVAILABLE: The app "${safeName}" has a registered skill. Use the ${safeName} skill commands (${cmds}) instead of vision/accessibility for this app.`,
         });
         log(`[agent-loop] Injected skill reminder for "${safeName}" (commands: ${cmds})`);
+      }
+
+      // Inject learned actions for this app (proactive — not just when stuck)
+      const learnedActions = getLearnedActionsForApp(currentApp);
+      if (learnedActions.length > 0) {
+        const actionSummaries = learnedActions
+          .sort((a, b) => b.useCount - a.useCount)
+          .slice(0, 10)
+          .map(a => {
+            const useSuffix = a.useCount > 1 ? ` (used ${a.useCount}x)` : '';
+            return `- ${a.type}/${a.visionAction || a.cdpAction || a.axAction || a.command?.substring(0, 60) || 'action'}: ${a.description}${useSuffix}`;
+          })
+          .join('\n');
+        goalState.conversationHistory.push({
+          role: 'user',
+          content: `LEARNED ACTIONS for "${safeName}" (previously successful — reuse these):\n${actionSummaries}`,
+        });
+        log(`[agent-loop] Injected ${learnedActions.length} learned actions for "${safeName}"`);
       }
     }
 
@@ -514,6 +624,11 @@ async function runSubGoalLoop(
 
     goalState.conversationHistory.push({ role: 'assistant', content: responseText });
 
+    // Check cancel after Claude API call
+    if (signal?.aborted) {
+      return { outcome: 'cancelled', summary: 'Cancelled by user', stepsUsed: subGoalSteps };
+    }
+
     // === PARSE RESPONSE ===
     goalState.commandCounter++;
     const parsed = parseResponse(responseText, goalState.commandCounter);
@@ -521,6 +636,15 @@ async function runSubGoalLoop(
 
     // --- Handle: complete ---
     if (parsed.type === 'complete') {
+      // False success validation: reject if actions were attempted but none succeeded
+      if (actionAttemptCount > 0 && successfulActionCount === 0) {
+        log(`[agent-loop] Rejecting false completion: ${actionAttemptCount} actions attempted, 0 succeeded`);
+        goalState.conversationHistory.push({
+          role: 'user',
+          content: `Your previous actions all failed. You cannot report "complete" when no actions succeeded. Try a different approach.`,
+        });
+        continue;
+      }
       callbacks.onComplete?.(parsed.summary, step);
       return { outcome: 'complete', summary: parsed.summary, stepsUsed: subGoalSteps };
     }
@@ -554,6 +678,7 @@ async function runSubGoalLoop(
     // --- Handle: action ---
     if (parsed.type === 'action') {
       consecutiveErrors = 0;
+      actionAttemptCount++;
       callbacks.onAction?.(parsed.command, parsed.thinking);
 
       // Track browser state
@@ -571,6 +696,10 @@ async function runSubGoalLoop(
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         callbacks.onError?.(msg, 'execution');
+
+        // Pre-execution failure (threw before any UI interaction) — safe to reuse screenshot
+        const isPreExecution = /command not found|parse error|syntax error|ENOENT|EACCES|not running|not found/i.test(msg);
+        reuseScreenshot = isPreExecution;
 
         // Track per-app failures on accessibility/vision layers
         const failLayer = parsed.command.layer;
@@ -644,6 +773,11 @@ async function runSubGoalLoop(
         continue;
       }
 
+      // Check cancel after action execution
+      if (signal?.aborted) {
+        return { outcome: 'cancelled', summary: 'Cancelled by user', stepsUsed: subGoalSteps };
+      }
+
       callbacks.onActionResult?.(parsed.command, result);
 
       // Track successful actions — reset per-app failure count
@@ -655,6 +789,7 @@ async function runSubGoalLoop(
 
       // Capture successful actions for learning
       if (result.status === 'success') {
+        successfulActionCount++;
         captureLearnedAction(parsed, observation, result);
       }
 
@@ -763,6 +898,12 @@ async function runSubGoalLoop(
  * When `decompose` is true, the goal is broken into sub-goals first, and the loop
  * iterates over each sub-goal sequentially with shared conversation history.
  */
+/** Budget bonus granted per completed sub-goal */
+const BUDGET_BONUS_PER_SUBGOAL = 8;
+
+/** Default wall-clock timeout (15 minutes) */
+const DEFAULT_WALL_CLOCK_MS = 15 * 60 * 1000;
+
 export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopResult> {
   const {
     goal,
@@ -774,10 +915,13 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
     signal,
   } = config;
 
-  // Global ceiling is the min of configured max and the absolute safety ceiling
-  const globalMax = Math.min(maxIterations, GLOBAL_ITERATION_CEILING);
+  // Adaptive budget: starts at maxIterations, grows on sub-goal completion, capped at ceiling
+  let budgetRemaining = Math.min(maxIterations, GLOBAL_ITERATION_CEILING);
+  const globalMax = GLOBAL_ITERATION_CEILING; // Hard ceiling
+  const startTime = Date.now();
+  const wallClockMs = DEFAULT_WALL_CLOCK_MS;
 
-  log(`[agent-loop] Starting. Goal: "${goal.substring(0, 80)}". Max iterations: ${globalMax}. Decompose: ${decompose}`);
+  log(`[agent-loop] Starting. Goal: "${goal.substring(0, 80)}". Initial budget: ${budgetRemaining}. Ceiling: ${globalMax}. Decompose: ${decompose}`);
 
   // Initialize LLM
   try {
@@ -797,7 +941,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
     commandCounter: 0,
     discoveredApps: new Set<string>(),
     appFailures: {} as Record<string, number>,
-    skillInjectedApps: new Set<string>(),
+    axFailedApps: new Set<string>(),
+    knowledgeInjectedApps: new Set<string>(),
   };
 
   // ---------------------------------------------------------------------------
@@ -806,7 +951,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
   if (!decompose) {
     const result = await runSubGoalLoop(
       goal, 'Main goal', goalState, sendAndWait, callbacks,
-      settleDelayMs, 0, globalMax, signal,
+      settleDelayMs, 0, budgetRemaining, signal,
     );
 
     // Map inner result to AgentLoopResult
@@ -857,6 +1002,20 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
   for (let i = 0; i < subGoals.length; i++) {
     const sg = subGoals[i];
 
+    // Wall-clock timeout check
+    if (Date.now() - startTime > wallClockMs) {
+      log(`[agent-loop] Wall-clock timeout: ${wallClockMs}ms elapsed`);
+      for (let j = i; j < subGoals.length; j++) {
+        subGoalResults.push({ subGoal: subGoals[j], outcome: 'not_started' });
+      }
+      return {
+        outcome: 'max_iterations',
+        summary: `Wall-clock timeout (${Math.round(wallClockMs / 60000)} min) reached after ${totalSteps} steps`,
+        steps: totalSteps,
+        subGoalResults,
+      };
+    }
+
     // Check cancel before starting each sub-goal
     if (signal?.aborted) {
       // Mark remaining sub-goals as not started
@@ -875,6 +1034,36 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
     log(`[agent-loop] Starting sub-goal ${i + 1}/${subGoals.length}: "${sg.label}"`);
     callbacks.onSubGoalStart?.(sg, i, subGoals.length);
 
+    // === SKILL COMMAND FAST PATH ===
+    // If the sub-goal has a skillCommand, execute it directly — no observe-decide-act loop
+    if (sg.skillCommand) {
+      log(`[agent-loop] Skill command fast path: ${sg.skillCommand.runtime} ${sg.skillCommand.command}`);
+      const skillResult = await executeSkillCommand(sg.skillCommand);
+      totalSteps += 1; // Skill counts as 1 step
+
+      if (skillResult.success) {
+        subGoalResults.push({ subGoal: sg, outcome: 'complete' });
+        callbacks.onSubGoalComplete?.(sg, i, subGoals.length, 'complete');
+        log(`[agent-loop] Skill command completed successfully`);
+        callbacks.onComplete?.(skillResult.output.substring(0, 200), totalSteps);
+
+        return {
+          outcome: 'complete',
+          summary: `Skill command completed: ${skillResult.output.substring(0, 200)}`,
+          steps: totalSteps,
+          subGoalResults,
+        };
+      }
+
+      // Skill failed — fall back to normal vision decomposition with fresh context
+      log(`[agent-loop] Skill command failed: ${skillResult.error}. Falling back to vision loop.`);
+      goalState.conversationHistory.push({
+        role: 'user',
+        content: `Skill "${sg.skillCommand.command}" partially executed but failed: ${skillResult.error}. Assess the current screen state and complete the task using UI automation.`,
+      });
+      // Continue to normal sub-goal loop below (don't return)
+    }
+
     // Summarize conversation from previous sub-goal at boundary
     if (i > 0 && goalState.conversationHistory.length > 20) {
       const prevSg = subGoals[i - 1];
@@ -885,17 +1074,25 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentLoopRe
       });
     }
 
+    const effectiveBudget = Math.min(totalSteps + budgetRemaining, globalMax);
     const sgResult = await runSubGoalLoop(
       sg.description, sg.label, goalState, sendAndWait, callbacks,
-      settleDelayMs, totalSteps, globalMax, signal,
+      settleDelayMs, totalSteps, effectiveBudget, signal,
     );
 
     totalSteps += sgResult.stepsUsed;
+    budgetRemaining -= sgResult.stepsUsed;
 
     // Map inner outcome to SubGoalOutcome
     let sgOutcome: SubGoalOutcome;
     if (sgResult.outcome === 'complete') {
       sgOutcome = 'complete';
+      // Adaptive budget: grant bonus steps on sub-goal completion
+      const bonus = Math.min(BUDGET_BONUS_PER_SUBGOAL, globalMax - totalSteps - budgetRemaining);
+      if (bonus > 0) {
+        budgetRemaining += bonus;
+        log(`[agent-loop] Budget bonus: +${bonus} steps (remaining: ${budgetRemaining})`);
+      }
     } else if (sgResult.outcome === 'cancelled') {
       sgOutcome = 'cancelled';
     } else {

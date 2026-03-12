@@ -18,6 +18,15 @@ function timestamp(): string {
 }
 
 /**
+ * Sanitize an app name for safe embedding in AppleScript strings.
+ * Allows only alphanumeric, spaces, hyphens, and periods.
+ * Prevents AppleScript injection from LLM-sourced app names.
+ */
+function sanitizeAppName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9 \-.]/g, '');
+}
+
+/**
  * Launch an application by name.
  * Uses macOS `open -a` command which searches Applications folders.
  *
@@ -26,12 +35,13 @@ function timestamp(): string {
 export async function launchApp(appName: string): Promise<AppLauncherResult> {
   log(`[${timestamp()}] [app-launcher] Launching: ${appName}`);
 
-  const result = await executeShellCommand(`open -a "${appName}"`);
+  const safe = sanitizeAppName(appName);
+  const result = await executeShellCommand(`open -a "${safe}"`);
 
   if (result.exitCode === 0) {
-    return { success: true, message: `Launched "${appName}" successfully` };
+    return { success: true, message: `Launched "${safe}" successfully` };
   }
-  return { success: false, message: `Failed to launch "${appName}"`, error: result.error };
+  return { success: false, message: `Failed to launch "${safe}"`, error: result.error };
 }
 
 /**
@@ -43,13 +53,14 @@ export async function launchApp(appName: string): Promise<AppLauncherResult> {
 export async function switchToApp(appName: string): Promise<AppLauncherResult> {
   log(`[${timestamp()}] [app-launcher] Switching to: ${appName}`);
 
-  const script = `osascript -e 'tell application "${appName}" to activate'`;
+  const safe = sanitizeAppName(appName);
+  const script = `osascript -e 'tell application "${safe}" to activate'`;
   const result = await executeShellCommand(script);
 
   if (result.exitCode === 0) {
-    return { success: true, message: `Switched to "${appName}"` };
+    return { success: true, message: `Switched to "${safe}"` };
   }
-  return { success: false, message: `Failed to switch to "${appName}"`, error: result.error };
+  return { success: false, message: `Failed to switch to "${safe}"`, error: result.error };
 }
 
 /**
@@ -61,13 +72,14 @@ export async function switchToApp(appName: string): Promise<AppLauncherResult> {
 export async function closeApp(appName: string): Promise<AppLauncherResult> {
   log(`[${timestamp()}] [app-launcher] Closing: ${appName}`);
 
-  const script = `osascript -e 'tell application "${appName}" to quit'`;
+  const safe = sanitizeAppName(appName);
+  const script = `osascript -e 'tell application "${safe}" to quit'`;
   const result = await executeShellCommand(script);
 
   if (result.exitCode === 0) {
-    return { success: true, message: `Closed "${appName}"` };
+    return { success: true, message: `Closed "${safe}"` };
   }
-  return { success: false, message: `Failed to close "${appName}"`, error: result.error };
+  return { success: false, message: `Failed to close "${safe}"`, error: result.error };
 }
 
 /**
@@ -98,13 +110,14 @@ export async function listRunningApps(): Promise<AppLauncherResult> {
 export async function minimizeWindow(appName?: string): Promise<AppLauncherResult> {
   if (appName) {
     log(`[${timestamp()}] [app-launcher] Minimizing: ${appName}`);
-    const script = `osascript -e 'tell application "${appName}" to activate' -e 'delay 0.5' -e 'tell application "System Events" to keystroke "m" using command down'`;
+    const safe = sanitizeAppName(appName);
+    const script = `osascript -e 'tell application "${safe}" to activate' -e 'delay 0.5' -e 'tell application "System Events" to keystroke "m" using command down'`;
     const result = await executeShellCommand(script);
 
     if (result.exitCode === 0) {
-      return { success: true, message: `Minimized "${appName}"` };
+      return { success: true, message: `Minimized "${safe}"` };
     }
-    return { success: false, message: `Failed to minimize "${appName}"`, error: result.error };
+    return { success: false, message: `Failed to minimize "${safe}"`, error: result.error };
   }
 
   log(`[${timestamp()}] [app-launcher] Minimizing frontmost window`);

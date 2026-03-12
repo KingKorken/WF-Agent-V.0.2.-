@@ -5,11 +5,15 @@
  * This is the workhorse for launching apps, running system commands,
  * file operations, and anything you'd normally type in a terminal.
  *
- * Safety: Every command is wrapped in a try/catch with a timeout.
- * The agent should never crash due to a shell command failing.
+ * Safety:
+ * - Uses execFile('/bin/sh', ['-c', command]) instead of exec(command).
+ *   This ensures the command string is passed as a single argument to /bin/sh,
+ *   preventing shell metacharacter injection from string concatenation.
+ * - Every command is wrapped in a try/catch with a timeout.
+ * - The agent should never crash due to a shell command failing.
  */
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { ShellExecResult } from '@workflow-agent/shared';
 import { DEFAULT_SHELL_TIMEOUT_MS } from '@workflow-agent/shared';
 import { log } from '../../utils/logger';
@@ -33,7 +37,9 @@ export async function executeShellCommand(
   log(`[${timestamp()}] [shell-executor] Executing: ${command}`);
 
   return new Promise((resolve) => {
-    exec(command, { timeout }, (error, stdout, stderr) => {
+    // Use execFile with /bin/sh -c to avoid shell injection from string interpolation.
+    // The command is passed as a single argument to sh, not interpolated into a shell string.
+    execFile('/bin/sh', ['-c', command], { timeout }, (error, stdout, stderr) => {
       if (error) {
         // The command failed — could be a timeout, bad command, or non-zero exit code
         log(`[${timestamp()}] [shell-executor] Error: ${error.message}`);

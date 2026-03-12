@@ -21,6 +21,7 @@ export function ChatView() {
   const agentLogLength = useChatStore((s) => s.agentLog.length);
   const suggestionsVisible = useChatStore((s) => s.suggestionsVisible);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const cancelTask = useChatStore((s) => s.cancelTask);
   const debugToggle = useDebugStore((s) => s.toggle);
   const debugOpen = useDebugStore((s) => s.isOpen);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -54,6 +55,11 @@ export function ChatView() {
               <div className={styles.typingIndicator}>
                 <LoadingDots />
               </div>
+            )}
+            {isAgentTyping && (
+              <button className={styles.stopButton} onClick={cancelTask}>
+                Stop
+              </button>
             )}
             <div ref={messagesEndRef} />
           </div>

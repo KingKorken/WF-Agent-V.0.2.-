@@ -39,6 +39,8 @@ import {
   ServerActionPreview,
   DashboardActionConfirm,
   DashboardActionCancel,
+  DashboardCancelTask,
+  ServerCancelAck,
   ServerSubGoalProgress,
   ServerDebugLog,
   WebSocketMessage,
@@ -193,6 +195,7 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'server_request_workflow', 'agent_workflow_data',
   'agent_skill_upload', 'agent_skill_list_request',
   'server_action_preview', 'dashboard_action_confirm', 'dashboard_action_cancel',
+  'dashboard_cancel_task', 'server_cancel_ack',
   'server_debug_log',
 ]);
 
@@ -258,6 +261,8 @@ class Room {
   private readonly _chatHistories = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
   private _pendingPreview: PendingActionPreview | null = null;
   private _agentAbortSignal: { aborted: boolean } = { aborted: false };
+  private _loopPromise: Promise<AgentLoopResult> | null = null;
+  private _completedSubGoals: string[] = [];
 
   constructor(id: string) {
     this.id = id;
@@ -276,6 +281,10 @@ class Room {
   get agentAbortSignal(): { aborted: boolean } { return this._agentAbortSignal; }
   resetAbortSignal(): void { this._agentAbortSignal = { aborted: false }; }
   abortAgent(): void { this._agentAbortSignal.aborted = true; }
+  get loopPromise(): Promise<AgentLoopResult> | null { return this._loopPromise; }
+  set loopPromise(val: Promise<AgentLoopResult> | null) { this._loopPromise = val; }
+  get completedSubGoals(): string[] { return this._completedSubGoals; }
+  set completedSubGoals(val: string[]) { this._completedSubGoals = val; }
 
   setAgentSocket(ws: WebSocket | null, info?: AgentInfo): void {
     this._agentSocket = ws;
@@ -1121,7 +1130,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
       sendProgress('step', 'Decomposing task into sub-goals...', `Goal: ${plan.substring(0, 100)}`);
     }
 
-    const result = await runAgentLoop({
+    const loopPromise = runAgentLoop({
       goal,
       sendAndWait: (cmd) => room.sendCommandAndWait(cmd, commandTimeoutMs),
       maxIterations: maxIter,
@@ -1211,9 +1220,19 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
             status,
           };
           room.sendToDashboard(sgProgress);
+          // Track completed sub-goals for cancel ack
+          if (outcome === 'complete') {
+            room.completedSubGoals.push(subGoal.label);
+          }
         },
       },
     });
+
+    // Track loop promise for cancel coordination
+    room.loopPromise = loopPromise;
+    room.completedSubGoals = [];
+    const result = await loopPromise;
+    room.loopPromise = null;
 
     // Send completion summary as a chat message
     sendDebugLog(room, 'info', 'handleActionConfirm', `Agent loop complete: ${result.outcome}`, result.summary?.substring(0, 150));
@@ -1501,6 +1520,44 @@ async function main(): Promise<void> {
           if (room) {
             logRoom(room.id, `Workflow cancel requested: ${(msg as DashboardWorkflowCancel).workflowId}`);
             room.abortAgent();
+          }
+          break;
+        }
+
+        // ----- Dashboard task cancel (stop agent loop) -----
+        case 'dashboard_cancel_task': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            const cancelMsg = msg as DashboardCancelTask;
+            logRoom(room.id, `Task cancel requested: ${cancelMsg.conversationId}`);
+            room.abortAgent();
+
+            // Wait for the loop to finish, then send ack
+            if (room.loopPromise) {
+              room.loopPromise
+                .then(() => {
+                  const ack: ServerCancelAck = {
+                    type: 'server_cancel_ack',
+                    conversationId: cancelMsg.conversationId,
+                    completedSubGoals: room.completedSubGoals,
+                  };
+                  room.sendToDashboard(ack);
+                  room.loopPromise = null;
+                  room.agentLoopActive = false;
+                  logRoom(room.id, `Task cancelled. Completed sub-goals: ${room.completedSubGoals.join(', ') || 'none'}`);
+                })
+                .catch(() => {
+                  room.loopPromise = null;
+                  room.agentLoopActive = false;
+                });
+            } else {
+              // No loop running — ack immediately
+              room.sendToDashboard({
+                type: 'server_cancel_ack',
+                conversationId: cancelMsg.conversationId,
+                completedSubGoals: [],
+              } as ServerCancelAck);
+            }
           }
           break;
         }

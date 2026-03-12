@@ -135,12 +135,20 @@ IMPORTANT: Your response must be valid JSON only. No markdown formatting, no cod
 export function formatObservation(
   observation: Observation,
   goal: string,
-  stepNumber: number
+  stepNumber: number,
+  budgetInfo?: { maxSteps: number; remaining: number },
 ): ConversationMessage {
   log(`[prompt-builder] Formatting observation for step ${stepNumber}`);
 
   // Build text description
-  let text = `GOAL: ${goal}\n\nSTEP ${stepNumber} — CURRENT OBSERVATION:\n\n`;
+  let text = `GOAL: ${goal}\n\n`;
+
+  // Budget awareness — let the agent know how many steps remain
+  if (budgetInfo) {
+    text += `[BUDGET: Step ${stepNumber}/${budgetInfo.maxSteps}, ${budgetInfo.remaining} remaining]\n`;
+  }
+
+  text += `STEP ${stepNumber} — CURRENT OBSERVATION:\n\n`;
 
   // Window context
   text += `Frontmost App: ${observation.frontmostApp}\n`;

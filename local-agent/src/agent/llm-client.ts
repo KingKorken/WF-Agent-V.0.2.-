@@ -52,7 +52,7 @@ const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TOKENS = 4096;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_SEC = [5, 10, 20];
-const RECENT_TURNS_TO_KEEP = 10; // keep last 5 pairs (user+assistant) with full images
+const RECENT_TURNS_TO_KEEP = 6; // keep last 3 pairs (user+assistant) with full images — reduced from 10 to cut 40% of image tokens
 
 // ---------------------------------------------------------------------------
 // Internal helpers

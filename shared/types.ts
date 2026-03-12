@@ -740,6 +740,23 @@ export interface DashboardActionCancel {
 }
 
 // ---------------------------------------------------------------------------
+// Task cancellation — stop a running agent task
+// ---------------------------------------------------------------------------
+
+/** Request to cancel a running task (from dashboard) */
+export interface DashboardCancelTask {
+  type: 'dashboard_cancel_task';
+  conversationId: string;
+}
+
+/** Acknowledgement that the task was cancelled (from server) */
+export interface ServerCancelAck {
+  type: 'server_cancel_ack';
+  conversationId: string;
+  completedSubGoals: string[];
+}
+
+// ---------------------------------------------------------------------------
 // Debug logging — pipeline visibility for dashboard + fly logs
 // ---------------------------------------------------------------------------
 
@@ -780,6 +797,7 @@ export type WebSocketMessage =
   | AgentSkillUpload | AgentSkillListRequest
   | ServerSkillListResult | ServerSkillBroadcast
   | ServerActionPreview | DashboardActionConfirm | DashboardActionCancel
+  | DashboardCancelTask | ServerCancelAck
   | ServerSubGoalProgress | ServerDebugLog;
 
 // ---------------------------------------------------------------------------
