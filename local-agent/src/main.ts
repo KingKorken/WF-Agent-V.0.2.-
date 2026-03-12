@@ -13,11 +13,12 @@
  */
 
 import { app, dialog } from 'electron';
+import WebSocket from 'ws';
 import { WebSocketClient } from './connection/websocket-client';
 import { createTray, updateConnectionStatus } from './ui/tray';
 import { APP_NAME } from '@workflow-agent/shared';
 import { log } from './utils/logger';
-import { loadConfig } from './utils/config';
+import { loadConfig, clearConfig } from './utils/config';
 import { BRIDGE_URL, ANTHROPIC_KEY } from './build-config';
 
 // ---------------------------------------------------------------------------
@@ -88,6 +89,62 @@ export function startConnection(roomId: string): void {
 }
 
 /**
+ * Quick-check whether a saved room token is still valid by opening a temporary
+ * WebSocket and waiting for the server to either accept or reject the hello.
+ * Returns true if the bridge accepts the token, false otherwise.
+ */
+function verifySavedToken(serverUrl: string, token: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    function settle(value: boolean) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      try { ws.close(); } catch { /* ignore */ }
+      resolve(value);
+    }
+
+    const ws = new WebSocket(serverUrl);
+    const timeout = setTimeout(() => settle(false), 5000);
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify({
+        type: 'hello',
+        agentName: 'token-validator',
+        version: '0.1.0',
+        platform: process.platform,
+        supportedLayers: [],
+        roomId: token,
+      }));
+      // If still connected after 1.5s, token was accepted
+      setTimeout(() => settle(true), 1500);
+    });
+
+    ws.on('close', (code) => {
+      // 1008 = Policy Violation (invalid/expired room token)
+      if (code === 1008) settle(false);
+    });
+
+    ws.on('error', () => settle(false));
+  });
+}
+
+/**
+ * Show the setup window. Extracted as a helper to avoid duplication.
+ */
+async function showSetup(): Promise<void> {
+  try {
+    const { showSetupWindow } = await import('./ui/setup-window');
+    showSetupWindow(startConnection);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`[${timestamp()}] [main] CRITICAL: Failed to show setup window: ${msg}`);
+    dialog.showErrorBox('Setup Error',
+      `Failed to open setup window.\n\n${msg}\n\nPlease reinstall the application.`);
+  }
+}
+
+/**
  * Initialize the agent when Electron is ready.
  */
 app.whenReady().then(async () => {
@@ -105,19 +162,22 @@ app.whenReady().then(async () => {
     log(`[${timestamp()}] [main] Using room ID from environment`);
     startConnection(envRoomId);
   } else if (savedConfig) {
-    log(`[${timestamp()}] [main] Using saved room ID from config`);
-    startConnection(savedConfig.roomId);
+    // Validate the saved token before using it — stale tokens survive app reinstalls
+    // because macOS does not delete ~/Library/Application Support/ on uninstall.
+    const serverUrl = process.env.WS_URL || BRIDGE_URL;
+    log(`[${timestamp()}] [main] Verifying saved room token...`);
+    const valid = await verifySavedToken(serverUrl, savedConfig.roomId);
+    if (valid) {
+      log(`[${timestamp()}] [main] Saved token verified — connecting`);
+      startConnection(savedConfig.roomId);
+    } else {
+      log(`[${timestamp()}] [main] Saved token invalid or bridge unreachable — clearing config and showing setup window`);
+      clearConfig();
+      await showSetup();
+    }
   } else {
     log(`[${timestamp()}] [main] No room ID found — showing setup window`);
-    try {
-      const { showSetupWindow } = await import('./ui/setup-window');
-      showSetupWindow(startConnection);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log(`[${timestamp()}] [main] CRITICAL: Failed to show setup window: ${msg}`);
-      dialog.showErrorBox('Setup Error',
-        `Failed to open setup window.\n\n${msg}\n\nPlease reinstall the application.`);
-    }
+    await showSetup();
   }
 
   log(`[${timestamp()}] [main] ${APP_NAME} is running. Check the system tray.`);

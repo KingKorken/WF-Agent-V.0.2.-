@@ -39,3 +39,15 @@ export function saveConfig(config: AgentConfig): void {
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
   log(`[config] Saved to ${configPath}`);
 }
+
+export function clearConfig(): void {
+  try {
+    const configPath = getConfigPath();
+    if (fs.existsSync(configPath)) {
+      fs.unlinkSync(configPath);
+      log(`[config] Cleared config at ${configPath}`);
+    }
+  } catch {
+    // Ignore — config file may not exist
+  }
+}
