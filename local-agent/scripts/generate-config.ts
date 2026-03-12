@@ -10,10 +10,20 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as dotenv from 'dotenv';
+
+// Load .env from project root (one level up from local-agent/).
+// When run via `npx tsx`, __dirname may be `.`, so use process.cwd() as a fallback.
+const scriptDir = path.resolve(__dirname);
+const localAgentDir = scriptDir.endsWith('/scripts') ? path.join(scriptDir, '..') : process.cwd();
+const envPath = path.join(localAgentDir, '../.env');
+// Use override: true so .env values take precedence over shell environment
+// (e.g. a stale ANTHROPIC_API_KEY in the shell won't shadow the .env value)
+dotenv.config({ path: envPath, override: true });
 
 const config = {
-  BRIDGE_URL: process.env.WFA_BRIDGE_URL ?? 'ws://localhost:8765',
-  ANTHROPIC_KEY: process.env.WFA_ANTHROPIC_KEY ?? '',
+  BRIDGE_URL: process.env.WFA_BRIDGE_URL ?? 'wss://wfa-bridge.fly.dev',
+  ANTHROPIC_KEY: process.env.WFA_ANTHROPIC_KEY ?? process.env.ANTHROPIC_API_KEY ?? '',
 };
 
 const output = [
