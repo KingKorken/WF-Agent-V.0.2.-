@@ -22,6 +22,11 @@ import type {
   AgentWorkflowList,
   AgentWorkflowDetail,
   AgentWorkflowDeleted,
+  ServerConversationCreated,
+  ServerConversationList,
+  ServerConversationMessages,
+  ServerConversationDeleted,
+  ServerSearchResults,
 } from '@shared/types';
 import { wsService } from './websocket';
 import { useChatStore } from '../stores/chatStore';
@@ -140,6 +145,54 @@ function handleMessage(message: WebSocketMessage): void {
         timestamp: new Date(),
       });
       store.resetTypingState();
+      break;
+    }
+
+    // --- Conversation persistence ---
+
+    case 'server_conversation_created': {
+      const msg = message as ServerConversationCreated;
+      useChatStore.getState().replaceConversationId(
+        msg.tempId,
+        msg.id,
+        msg.title,
+        msg.createdAt,
+      );
+      break;
+    }
+
+    case 'server_conversation_list': {
+      const msg = message as ServerConversationList;
+      useChatStore.getState().hydrateConversations(msg.conversations);
+      break;
+    }
+
+    case 'server_conversation_messages': {
+      const msg = message as ServerConversationMessages;
+      useChatStore.getState().loadConversationMessages(
+        msg.conversationId,
+        msg.messages,
+      );
+      break;
+    }
+
+    case 'server_conversation_deleted': {
+      const msg = message as ServerConversationDeleted;
+      useChatStore.getState().removeConversation(msg.conversationId);
+      break;
+    }
+
+    case 'server_search_results': {
+      // Search results can be handled by a future search UI component.
+      // For now, log them to debug store.
+      const msg = message as ServerSearchResults;
+      useDebugStore.getState().addEntry({
+        source: 'server',
+        level: 'info',
+        category: 'search',
+        message: `Search for "${msg.query}" returned ${msg.results.length} results`,
+        timestamp: new Date().toISOString(),
+      });
       break;
     }
 

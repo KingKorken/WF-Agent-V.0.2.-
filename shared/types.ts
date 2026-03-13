@@ -780,6 +780,90 @@ export interface ServerDebugLog {
   timestamp: string;
 }
 
+// ---------------------------------------------------------------------------
+// Conversation Persistence Protocol
+// ---------------------------------------------------------------------------
+
+/** Dashboard requests a new conversation */
+export interface DashboardNewConversation {
+  type: 'dashboard_new_conversation';
+  tempId: string;
+}
+
+/** Server confirms conversation creation */
+export interface ServerConversationCreated {
+  type: 'server_conversation_created';
+  tempId: string;
+  id: string;
+  title: string;
+  createdAt: string;
+}
+
+/** Server sends conversation list on dashboard connect */
+export interface ServerConversationList {
+  type: 'server_conversation_list';
+  conversations: Array<{
+    id: string;
+    title: string;
+    status: 'active' | 'complete' | 'interrupted';
+    createdAt: string;
+    updatedAt: string;
+    messageCount: number;
+    lastMessagePreview: string;
+  }>;
+}
+
+/** Dashboard requests full messages for a conversation */
+export interface DashboardLoadConversation {
+  type: 'dashboard_load_conversation';
+  conversationId: string;
+}
+
+/** Server responds with full message history */
+export interface ServerConversationMessages {
+  type: 'server_conversation_messages';
+  conversationId: string;
+  messages: Array<{
+    id: string;
+    role: 'user' | 'agent' | 'system';
+    type: string;
+    content: string;
+    metadata?: string;
+    timestamp: string;
+  }>;
+}
+
+/** Dashboard requests conversation deletion */
+export interface DashboardDeleteConversation {
+  type: 'dashboard_delete_conversation';
+  conversationId: string;
+}
+
+/** Server confirms deletion */
+export interface ServerConversationDeleted {
+  type: 'server_conversation_deleted';
+  conversationId: string;
+}
+
+/** Dashboard sends search query */
+export interface DashboardSearchConversations {
+  type: 'dashboard_search_conversations';
+  query: string;
+}
+
+/** Server responds with search results */
+export interface ServerSearchResults {
+  type: 'server_search_results';
+  query: string;
+  results: Array<{
+    conversationId: string;
+    conversationTitle: string;
+    messageId: string;
+    snippet: string;
+    timestamp: string;
+  }>;
+}
+
 /** Any message that can be sent over the WebSocket */
 export type WebSocketMessage =
   | AgentCommand | AgentResult | AgentHello
@@ -798,7 +882,11 @@ export type WebSocketMessage =
   | ServerSkillListResult | ServerSkillBroadcast
   | ServerActionPreview | DashboardActionConfirm | DashboardActionCancel
   | DashboardCancelTask | ServerCancelAck
-  | ServerSubGoalProgress | ServerDebugLog;
+  | ServerSubGoalProgress | ServerDebugLog
+  | DashboardNewConversation | ServerConversationCreated
+  | ServerConversationList | DashboardLoadConversation | ServerConversationMessages
+  | DashboardDeleteConversation | ServerConversationDeleted
+  | DashboardSearchConversations | ServerSearchResults;
 
 // ---------------------------------------------------------------------------
 // Workflow Definition — structured, reusable workflows (moved from local-agent)

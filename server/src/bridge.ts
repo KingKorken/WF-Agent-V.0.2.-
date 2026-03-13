@@ -43,11 +43,28 @@ import {
   ServerCancelAck,
   ServerSubGoalProgress,
   ServerDebugLog,
+  DashboardNewConversation,
+  ServerConversationCreated,
+  ServerConversationList,
+  DashboardLoadConversation,
+  ServerConversationMessages,
+  DashboardDeleteConversation,
+  ServerConversationDeleted,
+  DashboardSearchConversations,
+  ServerSearchResults,
   WebSocketMessage,
   WorkflowDefinition,
 } from '@workflow-agent/shared';
 import { formatWorkflowAsGoal } from './workflow-formatter';
 import { loadSkillsFromDisk, uploadSkill, getAllSkills } from './skill-repository';
+import {
+  initDatabase, closeDatabase,
+  createConversation, saveMessage, getConversationsByRoom, getMessagesByConversation,
+  deleteConversation as dbDeleteConversation, updateConversationStatus, updateConversationTitle,
+  searchMessages, getConversation, conversationExistsForRoom, createConversationAndMessage,
+  ensureConversation,
+} from './database';
+import type { ConversationSummary, StoredMessage, SearchResult } from './database';
 
 // Load .env from repo root
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
@@ -197,6 +214,8 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'server_action_preview', 'dashboard_action_confirm', 'dashboard_action_cancel',
   'dashboard_cancel_task', 'server_cancel_ack',
   'server_debug_log',
+  'dashboard_new_conversation', 'dashboard_load_conversation',
+  'dashboard_delete_conversation', 'dashboard_search_conversations',
 ]);
 
 function parseMessage(raw: string): WebSocketMessage | null {
@@ -548,6 +567,37 @@ function stripBase64(content: string): string {
   return content.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]{100,}/g, '[screenshot omitted]');
 }
 
+/**
+ * Persist a message to SQLite without ever throwing.
+ * The relay path is critical; persistence is secondary.
+ */
+function saveMessageSafe(msg: {
+  id?: string;
+  conversationId: string;
+  role: string;
+  type: string;
+  content: string;
+  metadata?: string | null;
+}): void {
+  try {
+    saveMessage(msg);
+  } catch (err) {
+    console.error('[persistence] Failed to save message:', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
+ * Ensure a conversation exists in the DB for this room, without throwing.
+ * Creates it with the dashboard's ID if missing.
+ */
+function ensureConversationSafe(roomId: string, conversationId: string, title?: string): void {
+  try {
+    ensureConversation(conversationId, roomId, title);
+  } catch (err) {
+    console.error('[persistence] ensureConversation error:', err instanceof Error ? err.message : String(err));
+  }
+}
+
 /** Simple text chat with Claude — no vision, no screenshots, no agent loop */
 async function simpleChatWithClaude(room: Room, conversationId: string, userMessage: string): Promise<string> {
   const client = getAnthropicClient();
@@ -767,56 +817,67 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
 
   sendDebugLog(room, 'info', 'handleChatMessage', `Received: "${content.substring(0, 60)}"`, isDirect ? 'direct command' : undefined);
 
+  // --- Persistence: ensure conversation exists, save user message ---
+  ensureConversationSafe(room.id, conversationId, content.slice(0, 50));
+  saveMessageSafe({ id, conversationId, role: 'user', type: 'text', content });
+
   // Direct command mode (/shell, /browser, /ax, /vision)
   if (isDirect) {
     if (!room.isAgentConnected) {
+      const errContent = 'Agent is not connected. Start the local agent and try again.';
       room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'Agent is not connected. Start the local agent and try again.' },
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: errContent },
       });
+      saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'system', type: 'error', content: errContent });
       return;
     }
 
     const command = parseDirectCommand(room, content);
     if (!command) {
+      const errContent = 'Unknown direct command. Supported: /shell, /browser, /ax, /vision';
       room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'Unknown direct command. Supported: /shell, /browser, /ax, /vision' },
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: errContent },
       });
+      saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'system', type: 'error', content: errContent });
       return;
     }
 
     try {
       const result = await room.sendCommandAndWait(command);
+      const responseContent = result.status === 'success'
+        ? `\`\`\`\n${JSON.stringify(result.data, null, 2)}\n\`\`\``
+        : `Error: ${JSON.stringify(result.data)}`;
       room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: {
-          id: `resp_${id}`, role: 'agent', type: 'text',
-          content: result.status === 'success'
-            ? `\`\`\`\n${JSON.stringify(result.data, null, 2)}\n\`\`\``
-            : `Error: ${JSON.stringify(result.data)}`,
-        },
+        message: { id: `resp_${id}`, role: 'agent', type: 'text', content: responseContent },
       });
+      saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'agent', type: 'text', content: responseContent });
     } catch (err) {
+      const errContent = `Command failed: ${err instanceof Error ? err.message : String(err)}`;
       room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: { id: `resp_${id}`, role: 'system', type: 'error', content: `Command failed: ${err instanceof Error ? err.message : String(err)}` },
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: errContent },
       });
+      saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'system', type: 'error', content: errContent });
     }
     return;
   }
 
   // Normal chat — classify intent, then route accordingly
   if (!process.env.ANTHROPIC_API_KEY) {
+    const errContent = 'ANTHROPIC_API_KEY not configured.';
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
-      message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'ANTHROPIC_API_KEY not configured.' },
+      message: { id: `resp_${id}`, role: 'system', type: 'error', content: errContent },
     });
+    saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'system', type: 'error', content: errContent });
     return;
   }
 
@@ -846,21 +907,25 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
     // Action intent — check prerequisites, then send preview
     if (!room.isAgentConnected) {
       sendDebugLog(room, 'warn', 'handleChatMessage', 'Agent not connected, cannot execute action');
+      const errContent = 'Your WF-Agent app needs to be running to perform this task. Please open it and try again.';
       room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'Your WF-Agent app needs to be running to perform this task. Please open it and try again.' },
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: errContent },
       });
+      saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'system', type: 'error', content: errContent });
       return;
     }
 
     if (room.agentLoopActive) {
       sendDebugLog(room, 'warn', 'handleChatMessage', 'Agent loop already active');
+      const errContent = 'A task is already running. Please wait for it to finish.';
       room.sendToDashboard({
         type: 'server_chat_response',
         conversationId,
-        message: { id: `resp_${id}`, role: 'system', type: 'error', content: 'A task is already running. Please wait for it to finish.' },
+        message: { id: `resp_${id}`, role: 'system', type: 'error', content: errContent },
       });
+      saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'system', type: 'error', content: errContent });
       return;
     }
 
@@ -887,6 +952,7 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
     };
     sendDebugLog(room, 'info', 'handleChatMessage', `Preview card sent: ${previewId}`, classification.plan);
     room.sendToDashboard(preview);
+    saveMessageSafe({ id: previewId, conversationId, role: 'system', type: 'action_preview', content: classification.plan });
     return;
   }
 
@@ -899,14 +965,17 @@ async function handleChatMessage(room: Room, msg: DashboardChatMessage): Promise
       conversationId,
       message: { id: `resp_${id}`, role: 'agent', type: 'text', content: reply },
     });
+    saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'agent', type: 'text', content: reply });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     sendDebugLog(room, 'error', 'handleChatMessage', `Chat error: ${errMsg}`);
+    const errContent = `Chat error: ${errMsg}`;
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
-      message: { id: `resp_${id}`, role: 'system', type: 'error', content: `Chat error: ${err instanceof Error ? err.message : String(err)}` },
+      message: { id: `resp_${id}`, role: 'system', type: 'error', content: errContent },
     });
+    saveMessageSafe({ id: `resp_${id}`, conversationId, role: 'system', type: 'error', content: errContent });
   }
 }
 
@@ -1236,6 +1305,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
 
     // Send completion summary as a chat message
     sendDebugLog(room, 'info', 'handleActionConfirm', `Agent loop complete: ${result.outcome}`, result.summary?.substring(0, 150));
+    const completionContent = result.summary || 'Task completed.';
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
@@ -1243,14 +1313,17 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
         id: `resp_complete_${previewId}`,
         role: 'agent',
         type: 'text',
-        content: result.summary || 'Task completed.',
+        content: completionContent,
       },
     });
+    saveMessageSafe({ id: `resp_complete_${previewId}`, conversationId, role: 'agent', type: 'text', content: completionContent });
+    try { updateConversationStatus(conversationId, 'complete'); } catch (e) { /* non-critical */ }
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     sendDebugLog(room, 'error', 'handleActionConfirm', `Agent loop failed: ${errorMsg}`);
     sendProgress('error', `Task failed: ${errorMsg}`, 'Unhandled exception in agent loop');
 
+    const errContent = `Task failed: ${errorMsg}`;
     room.sendToDashboard({
       type: 'server_chat_response',
       conversationId,
@@ -1258,9 +1331,10 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
         id: `resp_error_${previewId}`,
         role: 'system',
         type: 'error',
-        content: `Task failed: ${errorMsg}`,
+        content: errContent,
       },
     });
+    saveMessageSafe({ id: `resp_error_${previewId}`, conversationId, role: 'system', type: 'error', content: errContent });
   } finally {
     room.agentLoopActive = false;
   }
@@ -1338,6 +1412,7 @@ function getOrCreateRoom(roomId: string): Room {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  initDatabase();
   agentModulesLoaded = await loadAgentModules();
   initializeRooms();
   loadSkillsFromDisk();
@@ -1479,6 +1554,19 @@ async function main(): Promise<void> {
           logRoom(effectiveRoomId, `Dashboard connected: ${dhello.dashboardId} v${dhello.version}`);
           // Immediately broadcast agent status so dashboard gets initial state
           room.broadcastAgentStatus();
+
+          // Send persisted conversation list to dashboard
+          try {
+            const conversations = getConversationsByRoom(effectiveRoomId, 50);
+            const convList: ServerConversationList = {
+              type: 'server_conversation_list',
+              conversations,
+            };
+            room.sendToDashboard(convList);
+            logRoom(effectiveRoomId, `Sent ${conversations.length} conversations to dashboard`);
+          } catch (err) {
+            logRoom(effectiveRoomId, `Failed to load conversations: ${err instanceof Error ? err.message : String(err)}`);
+          }
           break;
         }
 
@@ -1582,6 +1670,104 @@ async function main(): Promise<void> {
           break;
         }
 
+        // ----- Conversation persistence CRUD -----
+        case 'dashboard_new_conversation': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            const newConvMsg = msg as DashboardNewConversation;
+            try {
+              const id = createConversation(room.id);
+              const conv = getConversation(id);
+              const created: ServerConversationCreated = {
+                type: 'server_conversation_created',
+                tempId: newConvMsg.tempId,
+                id,
+                title: conv?.title || 'New conversation',
+                createdAt: new Date().toISOString(),
+              };
+              room.sendToDashboard(created);
+              logRoom(room.id, `Conversation created: ${id} (tempId: ${newConvMsg.tempId})`);
+            } catch (err) {
+              logRoom(room.id, `Failed to create conversation: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          break;
+        }
+
+        case 'dashboard_load_conversation': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            const loadMsg = msg as DashboardLoadConversation;
+            try {
+              if (!conversationExistsForRoom(loadMsg.conversationId, room.id)) {
+                logRoom(room.id, `Load denied: conversation ${loadMsg.conversationId} not in room`);
+                break;
+              }
+              const messages = getMessagesByConversation(loadMsg.conversationId);
+              const response: ServerConversationMessages = {
+                type: 'server_conversation_messages',
+                conversationId: loadMsg.conversationId,
+                messages: messages.map(m => ({
+                  id: m.id,
+                  role: m.role,
+                  type: m.type,
+                  content: m.content,
+                  metadata: m.metadata || undefined,
+                  timestamp: m.timestamp,
+                })),
+              };
+              room.sendToDashboard(response);
+              logRoom(room.id, `Loaded ${messages.length} messages for conversation ${loadMsg.conversationId}`);
+            } catch (err) {
+              logRoom(room.id, `Failed to load conversation: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          break;
+        }
+
+        case 'dashboard_delete_conversation': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            const delMsg = msg as DashboardDeleteConversation;
+            try {
+              const deleted = dbDeleteConversation(delMsg.conversationId, room.id);
+              if (deleted) {
+                const ack: ServerConversationDeleted = {
+                  type: 'server_conversation_deleted',
+                  conversationId: delMsg.conversationId,
+                };
+                room.sendToDashboard(ack);
+                logRoom(room.id, `Conversation deleted: ${delMsg.conversationId}`);
+              } else {
+                logRoom(room.id, `Delete failed: conversation ${delMsg.conversationId} not found in room`);
+              }
+            } catch (err) {
+              logRoom(room.id, `Failed to delete conversation: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          break;
+        }
+
+        case 'dashboard_search_conversations': {
+          const room = findRoomBySocket(ws);
+          if (room) {
+            const searchMsg = msg as DashboardSearchConversations;
+            try {
+              const results = searchMessages(room.id, searchMsg.query);
+              const response: ServerSearchResults = {
+                type: 'server_search_results',
+                query: searchMsg.query,
+                results,
+              };
+              room.sendToDashboard(response);
+              logRoom(room.id, `Search "${searchMsg.query}": ${results.length} results`);
+            } catch (err) {
+              logRoom(room.id, `Search failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          break;
+        }
+
         // ----- Dashboard → Agent relay (recording & workflow CRUD) -----
         case 'dashboard_start_recording':
         case 'dashboard_stop_recording':
@@ -1675,6 +1861,19 @@ async function main(): Promise<void> {
         if (room.clearAgentIfMatch(ws)) {
           logRoom(room.id, 'Agent disconnected');
           room.rejectAllPending('Agent disconnected');
+          // Mark active conversations as interrupted if agent loop was running
+          if (room.agentLoopActive) {
+            try {
+              const conversations = getConversationsByRoom(room.id, 10);
+              for (const conv of conversations) {
+                if (conv.status === 'active') {
+                  updateConversationStatus(conv.id, 'interrupted');
+                }
+              }
+            } catch (err) {
+              console.error('[persistence] Failed to mark conversations interrupted:', err);
+            }
+          }
           room.agentLoopActive = false;
           room.broadcastAgentStatus();
           return;
@@ -1699,6 +1898,7 @@ async function main(): Promise<void> {
   function shutdown(signal: string): void {
     log(`${signal} received, shutting down...`);
     clearInterval(heartbeatInterval);
+    closeDatabase();
     for (const client of wss.clients) {
       client.close(1001, 'Server shutting down');
     }

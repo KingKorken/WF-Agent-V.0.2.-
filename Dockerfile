@@ -16,8 +16,11 @@ COPY server/package.json server/
 COPY local-agent/package.json local-agent/
 COPY dashboard/package.json dashboard/
 
-# 3. Install ALL dependencies (npm workspaces need the full graph to resolve)
-RUN npm ci --ignore-scripts
+# 3. Install build tools for native modules (better-sqlite3)
+RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+
+# 4. Install ALL dependencies (npm workspaces need the full graph to resolve)
+RUN npm ci
 
 # 4. Copy source for shared + server + local-agent (agent loop orchestration)
 COPY shared/ shared/
@@ -48,8 +51,10 @@ COPY server/package.json server/
 COPY local-agent/package.json local-agent/
 COPY dashboard/package.json dashboard/
 
-# Install production dependencies only
-RUN npm ci --omit=dev --ignore-scripts
+# Install build tools for native modules, install deps, then clean up
+RUN apt-get update && apt-get install -y python3 make g++ && \
+    npm ci --omit=dev && \
+    apt-get purge -y python3 make g++ && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 # Copy compiled output from builder
 COPY --from=builder /app/shared/dist shared/dist
@@ -59,6 +64,9 @@ COPY --from=builder /app/local-agent/dist local-agent/dist
 # Copy shared package files needed at runtime
 COPY shared/types.ts shared/types.ts
 COPY shared/index.ts shared/index.ts
+
+# Ensure /data volume is writable by appuser (Fly.io volumes are root-owned)
+RUN mkdir -p /data && chown -R 1001:1001 /data
 
 # Switch to non-root user
 USER appuser
