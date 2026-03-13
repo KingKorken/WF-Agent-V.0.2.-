@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { WorkflowSummary } from '@shared/types';
 import { wsService } from '../services/websocket';
+import { useChatStore } from './chatStore';
 
 export type RecordingState = 'idle' | 'recording' | 'parsing' | 'complete' | 'error';
 
@@ -10,6 +11,7 @@ export interface QueuedWorkflow {
   progress: string; // e.g., "29/47"
   currentStep: string;
   position: number; // 0 = currently executing
+  conversationId: string; // the chat this workflow was started from
 }
 
 export interface CancelledDisplay {
@@ -104,12 +106,16 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
     if (!workflow) return;
     if (queue.some((q) => q.workflowId === workflowId)) return;
 
+    // Capture the active conversation at the time of starting the workflow
+    const conversationId = useChatStore.getState().activeConversationId;
+
     const queued: QueuedWorkflow = {
       workflowId,
       name: workflow.name,
       progress: '0/0',
       currentStep: 'Starting...',
       position: queue.length,
+      conversationId,
     };
 
     useWorkflowStore.getState().queueWorkflow(queued);
