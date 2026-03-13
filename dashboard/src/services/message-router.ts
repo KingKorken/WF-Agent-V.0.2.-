@@ -104,6 +104,9 @@ function handleMessage(message: WebSocketMessage): void {
       const msg = message as ServerWorkflowProgress;
       const store = useWorkflowStore.getState();
 
+      // Guard: ignore progress for workflows no longer in queue (e.g., cancelled)
+      if (!store.queue.some((q) => q.workflowId === msg.workflowId)) break;
+
       if (msg.status === 'complete' || msg.status === 'error') {
         store.completeExecution(msg.workflowId);
       } else {
@@ -304,6 +307,9 @@ export function initMessageRouter(): void {
       // Reset recording state on reconnect — we don't know if the agent
       // is still recording after a WS drop
       useWorkflowStore.getState().setRecordingState('idle');
+
+      // Clear stale cancelled display on reconnect
+      useWorkflowStore.getState().clearCancelledDisplay();
 
       // Reset typing state on reconnect — WS drop may have lost pending responses
       useChatStore.getState().resetTypingState();

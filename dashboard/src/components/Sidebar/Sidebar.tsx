@@ -18,9 +18,9 @@ export function Sidebar() {
       </div>
       <div className={styles.conversations}>
         <SidebarConversations />
+        <WorkflowProgress />
       </div>
       <div className={styles.spacer} />
-      <WorkflowProgress />
       <div className={styles.divider} />
       <SidebarDock />
       <SidebarProfile />

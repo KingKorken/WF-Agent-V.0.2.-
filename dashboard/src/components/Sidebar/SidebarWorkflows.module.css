@@ -88,6 +88,10 @@
   cursor: not-allowed;
 }
 
+.stopButton:hover {
+  background: #C4C4C4;
+}
+
 /* Orange circle indicator — same as recordIndicator */
 .startIndicator {
   position: relative;

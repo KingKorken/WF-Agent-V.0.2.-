@@ -12,6 +12,11 @@ export interface QueuedWorkflow {
   position: number; // 0 = currently executing
 }
 
+export interface CancelledDisplay {
+  name: string;
+  percent: number;
+}
+
 interface WorkflowState {
   // Workflow library
   workflows: WorkflowSummary[];
@@ -26,6 +31,7 @@ interface WorkflowState {
   queue: QueuedWorkflow[];
   executingWorkflow: QueuedWorkflow | null;
   expandedWorkflowId: string | null;
+  cancelledDisplay: CancelledDisplay | null;
 
   // Actions — send WebSocket commands
   fetchWorkflows: () => void;
@@ -34,6 +40,7 @@ interface WorkflowState {
   startRecording: (description: string) => void;
   stopRecording: () => void;
   runWorkflow: (workflowId: string) => void;
+  cancelWorkflow: (workflowId: string) => void;
 
   // Handlers — called by message-router
   setWorkflows: (list: WorkflowSummary[]) => void;
@@ -51,6 +58,7 @@ interface WorkflowState {
   startExecution: (workflowId: string) => void;
   completeExecution: (workflowId: string) => void;
   cancelQueued: (workflowId: string) => void;
+  clearCancelledDisplay: () => void;
 }
 
 export const useWorkflowStore = create<WorkflowState>((set) => ({
@@ -64,6 +72,7 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
   queue: [],
   executingWorkflow: null,
   expandedWorkflowId: null,
+  cancelledDisplay: null,
 
   // --- WebSocket command senders ---
 
@@ -110,6 +119,30 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
       workflowName: workflow.name,
     });
   },
+
+  cancelWorkflow: (workflowId) => {
+    const { executingWorkflow, queue } = useWorkflowStore.getState();
+    if (!executingWorkflow || executingWorkflow.workflowId !== workflowId) return;
+
+    // Parse current percent for the cancelled display
+    const parts = (executingWorkflow.progress ?? '0/0').split('/').map(Number);
+    const step = parts[0] ?? 0;
+    const total = parts[1] ?? 0;
+    const percent = total > 0 ? Math.min(100, Math.max(0, Math.round((step / total) * 100))) : 0;
+
+    // Send cancel to backend (fire-and-forget)
+    wsService.send({ type: 'dashboard_workflow_cancel', workflowId });
+
+    // Remove from queue WITHOUT auto-advancing — queue pauses
+    const newQueue = queue.filter((q) => q.workflowId !== workflowId);
+    set({
+      queue: newQueue,
+      executingWorkflow: null,
+      cancelledDisplay: { name: executingWorkflow.name, percent },
+    });
+  },
+
+  clearCancelledDisplay: () => set({ cancelledDisplay: null }),
 
   // --- Handlers called by message-router ---
 
