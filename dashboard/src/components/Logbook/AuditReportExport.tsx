@@ -161,14 +161,15 @@ function generatePdf(entries: AuditEntry[]): void {
 }
 
 export function AuditReportExport() {
-  const { isGeneratingReport, setGeneratingReport, getFilteredEntries } = useLogbookStore();
+  const isGeneratingReport = useLogbookStore((s) => s.isGeneratingReport);
+  const setGeneratingReport = useLogbookStore((s) => s.setGeneratingReport);
   const [error, setError] = useState<string | null>(null);
 
   const handleGenerate = async () => {
     setError(null);
     setGeneratingReport(true);
     try {
-      const entries = getFilteredEntries();
+      const entries = useLogbookStore.getState().getFilteredEntries();
       if (entries.length === 0) {
         setError('No entries to export. Adjust your filters.');
         setGeneratingReport(false);
