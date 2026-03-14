@@ -27,12 +27,16 @@ import type {
   ServerConversationMessages,
   ServerConversationDeleted,
   ServerSearchResults,
+  ServerAuditEntry,
+  ServerAuditSessionStart,
+  ServerAuditSessionEnd,
 } from '@shared/types';
 import { wsService } from './websocket';
 import { useChatStore } from '../stores/chatStore';
 import { useConnectionStore } from '../stores/connectionStore';
 import { useWorkflowStore } from '../stores/workflowStore';
 import { useDebugStore } from '../stores/debugStore';
+import { useLogbookStore } from '../stores/logbookStore';
 import { getRoomId } from '../config/room';
 
 // ---------------------------------------------------------------------------
@@ -252,6 +256,26 @@ function handleMessage(message: WebSocketMessage): void {
       break;
     }
 
+    // --- Audit logging ---
+
+    case 'server_audit_entry': {
+      const msg = message as ServerAuditEntry;
+      useLogbookStore.getState().addComplianceEntry(msg.entry, msg.sessionInfo);
+      break;
+    }
+
+    case 'server_audit_session_start': {
+      const msg = message as ServerAuditSessionStart;
+      useLogbookStore.getState().addSession(msg.session);
+      break;
+    }
+
+    case 'server_audit_session_end': {
+      const msg = message as ServerAuditSessionEnd;
+      useLogbookStore.getState().updateSessionEnd(msg.sessionId, msg.terminalState, msg.endTime, msg.stepCount);
+      break;
+    }
+
     // --- Debug logging ---
 
     case 'server_debug_log': {
@@ -313,6 +337,9 @@ export function initMessageRouter(): void {
 
       // Reset typing state on reconnect — WS drop may have lost pending responses
       useChatStore.getState().resetTypingState();
+
+      // Fetch historical audit entries on reconnect
+      useLogbookStore.getState().fetchHistoricalEntries();
 
       useDebugStore.getState().addEntry({
         source: 'client',

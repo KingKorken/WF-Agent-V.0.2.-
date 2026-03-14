@@ -886,7 +886,8 @@ export type WebSocketMessage =
   | DashboardNewConversation | ServerConversationCreated
   | ServerConversationList | DashboardLoadConversation | ServerConversationMessages
   | DashboardDeleteConversation | ServerConversationDeleted
-  | DashboardSearchConversations | ServerSearchResults;
+  | DashboardSearchConversations | ServerSearchResults
+  | ServerAuditEntry | ServerAuditSessionStart | ServerAuditSessionEnd;
 
 // ---------------------------------------------------------------------------
 // Workflow Definition — structured, reusable workflows (moved from local-agent)
@@ -969,4 +970,167 @@ export interface AppLauncherResult {
   message: string;
   /** Error message if the operation failed */
   error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Audit Logging — Compliance-grade audit trail (EU AI Act, GDPR, BDSG §76)
+// ---------------------------------------------------------------------------
+
+/** Branded type for SHA-256 hashes — prevents accidentally passing a UUID where a hash is expected */
+export type SHA256Hash = string & { readonly __brand: 'SHA256Hash' };
+
+/** Audit event type — what kind of action was performed (ISO/IEC 24970) */
+export type AuditEventType = 'llm_call' | 'tool_invocation' | 'decision' | 'human_review' | 'error' | 'cancellation';
+
+/** BDSG §76 action type — how personal data was processed */
+export type AuditActionType = 'collect' | 'read' | 'modify' | 'delete' | 'transmit' | 'combine';
+
+/** Terminal state of an audit session (EU AI Act Art. 12 — period of each use) */
+export type AuditTerminalState = 'success' | 'failure' | 'cancelled' | 'timeout' | 'in_progress';
+
+/** How the session was triggered (ISO 27001) */
+export type AuditTriggerType = 'manual' | 'scheduled' | 'event';
+
+/** Accessor role for audit log access (BDSG §76) */
+export type AuditAccessorRole = 'dpo' | 'regulator' | 'data_subject' | 'system';
+
+/** Access type for audit log meta-logging (GDPR Art. 5(2)) */
+export type AuditAccessType = 'query' | 'export' | 'verify' | 'erasure';
+
+/** Control layer identifier for audit (product-specific) */
+export type AuditControlLayer = 'skill' | 'shell' | 'cdp' | 'accessibility' | 'vision';
+
+// --- Session types ---
+
+/** Audit session — one complete workflow execution (Tier 1 in the three-tier hierarchy) */
+export interface AuditSession {
+  readonly id: string;
+  readonly roomId: string;
+  readonly userId: string | null;
+  readonly userPseudonymId: string;
+  readonly agentId: string | null;
+  readonly workflowId: string | null;
+  readonly workflowName: string;
+  readonly department: string;
+  readonly triggerType: AuditTriggerType;
+  readonly terminalState: AuditTerminalState;
+  readonly startTime: string;
+  readonly endTime: string | null;
+  readonly timezone: string;
+  readonly modelVersions: string | null;
+  readonly stepCount: number;
+  readonly humanOversightEvents: string | null;
+  readonly riskFlags: string | null;
+  readonly recordingIndicatorVisible: boolean;
+  readonly noEmployeeComparison: boolean;
+  readonly purposeLimitationScope: string;
+  readonly createdAt: string;
+}
+
+// --- Event types (two-layer architecture) ---
+
+/** Shared base for both L1 and L2 audit events */
+export interface AuditEventBase {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly createdAt: string;
+}
+
+/** Layer 1 — Operational audit event (erasable for GDPR Art. 17) */
+export interface AuditEventOperational extends AuditEventBase {
+  readonly userId: string | null;
+  readonly humanVerifierId: string | null;
+  readonly recipientId: string | null;
+  readonly originalValue: string | null;
+  readonly newValue: string | null;
+  readonly sourceIp: string | null;
+  readonly sourceDevice: string | null;
+  readonly sourceSessionId: string | null;
+}
+
+/** Layer 2 — Compliance audit event (immutable, pseudonymized, hash-chained) */
+export interface AuditEventCompliance extends AuditEventBase {
+  readonly userPseudonymId: string;
+  readonly timestamp: string;
+  readonly timezone: string;
+  readonly eventType: AuditEventType;
+  readonly actionType: AuditActionType;
+  readonly action: string;
+  readonly entityId: string | null;
+  readonly entityType: string | null;
+  readonly purpose: string;
+  readonly legalBasis: string;
+  readonly result: 'success' | 'failure';
+  readonly inputHash: string | null;
+  readonly outputSummary: string | null;
+  readonly reasoningContext: string | null;
+  readonly controlLayer: AuditControlLayer | null;
+  readonly authorizationScope: string | null;
+  readonly durationMs: number | null;
+  readonly llmDataTransferDestination: string | null;
+  readonly llmModelProvider: string | null;
+  readonly llmModelVersion: string | null;
+  readonly recordingIndicatorVisible: boolean;
+  readonly noEmployeeComparison: boolean;
+  readonly purposeLimitationScope: string;
+  readonly previousHash: SHA256Hash;
+  readonly entryHash: SHA256Hash;
+}
+
+// --- Filter types (endpoint-specific) ---
+
+/** Filters for querying audit sessions */
+export interface AuditSessionFilters {
+  /** Room ID — required for tenant isolation */
+  roomId: string;
+  dateFrom?: string;
+  dateTo?: string;
+  department?: string;
+  terminalState?: AuditTerminalState;
+  workflowId?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+/** Filters for querying audit events within a session */
+export interface AuditEventFilters {
+  /** Session ID — required */
+  sessionId: string;
+  eventType?: AuditEventType;
+  cursor?: string;
+  limit?: number;
+}
+
+/** Filters for audit data export */
+export interface AuditExportFilters {
+  /** Room ID — required for tenant isolation */
+  roomId: string;
+  dateFrom?: string;
+  dateTo?: string;
+  sessionIds?: string[];
+  format: 'json' | 'csv';
+}
+
+// --- WebSocket message types (server → dashboard) ---
+
+/** Real-time audit event pushed to dashboard (EU AI Act Art. 12 — tamper-resistant logging) */
+export interface ServerAuditEntry {
+  type: 'server_audit_entry';
+  entry: AuditEventCompliance;
+  sessionInfo: { workflowName: string; stepCount: number };
+}
+
+/** Audit session started — new workflow execution began */
+export interface ServerAuditSessionStart {
+  type: 'server_audit_session_start';
+  session: AuditSession;
+}
+
+/** Audit session ended — workflow execution reached terminal state */
+export interface ServerAuditSessionEnd {
+  type: 'server_audit_session_end';
+  sessionId: string;
+  terminalState: AuditTerminalState;
+  endTime: string;
+  stepCount: number;
 }

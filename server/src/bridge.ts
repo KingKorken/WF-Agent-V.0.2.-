@@ -17,6 +17,7 @@ import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as http from 'http';
+import type { AuditControlLayer } from '@workflow-agent/shared';
 import {
   DEFAULT_WS_PORT,
   AgentCommand,
@@ -65,6 +66,13 @@ import {
   ensureConversation,
 } from './database';
 import type { ConversationSummary, StoredMessage, SearchResult } from './database';
+import { initAuditDatabase, closeAuditDatabase, querySessionsFiltered, queryEventsBySession } from './audit-database';
+import {
+  startAuditSession, endAuditSession, logAuditEvent,
+  updateAuditSessionStepCount,
+  type BroadcastFn,
+} from './audit-logger';
+import { exportJSON, exportCSV } from './audit-exporter';
 
 // Load .env from repo root
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
@@ -216,6 +224,7 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'server_debug_log',
   'dashboard_new_conversation', 'dashboard_load_conversation',
   'dashboard_delete_conversation', 'dashboard_search_conversations',
+  'server_audit_entry', 'server_audit_session_start', 'server_audit_session_end',
 ]);
 
 function parseMessage(raw: string): WebSocketMessage | null {
@@ -1016,6 +1025,14 @@ async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise
   room.agentLoopActive = true;
   logRoom(room.id, `Running workflow: ${workflowName} (${workflowId})`);
 
+  // Start audit session
+  const auditBroadcast: BroadcastFn = (message) => {
+    room.sendToDashboard(message);
+    logRoom(room.id, `[audit] ${message.type}`);
+  };
+  const auditSessionId = startAuditSession(room.id, null, workflowId, workflowName, 'manual', auditBroadcast);
+  let workflowStepCount = 0;
+
   // Request structured workflow definition from the agent
   let goal: string;
   try {
@@ -1045,18 +1062,46 @@ async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise
       maxIterations: maxIter,
       callbacks: {
         onStep: (step: number, maxIterations: number) => {
+          workflowStepCount = step;
           logRoom(room.id, `[workflow] Step ${step}/${maxIterations}`);
           room.sendToDashboard({
             type: 'server_workflow_progress', workflowId,
             step, totalSteps: maxIterations, currentStepName: `Step ${step}`, status: 'running',
           });
+          updateAuditSessionStepCount(auditSessionId, step);
         },
         onObservation: (obs: unknown) => {
           const observation = obs as Record<string, unknown>;
           logRoom(room.id, `[workflow] Observing: ${observation.frontmostApp || 'unknown'}`);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'decision', actionType: 'collect', action: `Observing: ${observation.frontmostApp || 'unknown'}`,
+            result: 'success', controlLayer: null,
+            inputHash: null, outputSummary: null, reasoningContext: null,
+            workflowName, stepCount: workflowStepCount,
+          }, auditBroadcast);
         },
         onThinking: () => {
           logRoom(room.id, `[workflow] Sending to Claude...`);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'llm_call', actionType: 'transmit', action: 'Sending observation to Claude API',
+            result: 'success', controlLayer: null,
+            llmDataTransferDestination: process.env.LLM_API_REGION || 'us-east',
+            workflowName, stepCount: workflowStepCount,
+          } as any, auditBroadcast);
+        },
+        onParsed: (parsed: unknown, _step: number) => {
+          const p = parsed as Record<string, unknown>;
+          const type = p.type as string;
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'decision', actionType: 'read', action: `Claude decided: ${type}`,
+            result: 'success', controlLayer: null,
+            outputSummary: type === 'action' ? `Action: ${((p.command as Record<string, unknown>)?.action as string) || 'unknown'}` : type,
+            reasoningContext: (p.thinking as string)?.substring(0, 500) || null,
+            workflowName, stepCount: workflowStepCount,
+          }, auditBroadcast);
         },
         onAction: (_command: AgentCommand, thinking: string) => {
           logRoom(room.id, `[workflow] Executing: ${_command.layer}/${_command.action}`);
@@ -1064,12 +1109,36 @@ async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise
             type: 'server_workflow_progress', workflowId,
             step: 0, totalSteps: 0, currentStepName: thinking.substring(0, 100), status: 'running',
           });
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'tool_invocation', actionType: 'modify', action: `${_command.layer}/${_command.action}`,
+            result: 'success', controlLayer: _command.layer as AuditControlLayer,
+            inputHash: crypto.createHash('sha256').update(JSON.stringify(_command.params || {})).digest('hex'),
+            reasoningContext: thinking.substring(0, 500),
+            workflowName, stepCount: workflowStepCount,
+          }, auditBroadcast);
         },
         onActionResult: (_command: AgentCommand, result: AgentResult) => {
           logRoom(room.id, `[workflow] Result: ${result.status} for ${_command.layer}/${_command.action}`);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'tool_invocation', actionType: 'read',
+            action: `Result: ${_command.layer}/${_command.action}`,
+            result: result.status === 'success' ? 'success' : 'failure',
+            controlLayer: _command.layer as AuditControlLayer,
+            outputSummary: JSON.stringify(result.data || {}).substring(0, 500),
+            workflowName, stepCount: workflowStepCount,
+          }, auditBroadcast);
         },
         onError: (error: string, context: string) => {
           logRoom(room.id, `[workflow] Error: ${error} (${context})`);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'error', actionType: 'read', action: `Error: ${error}`,
+            result: 'failure', controlLayer: null,
+            reasoningContext: context,
+            workflowName, stepCount: workflowStepCount,
+          }, auditBroadcast);
         },
         onComplete: (summary: string) => {
           logRoom(room.id, `[workflow] Complete: ${summary.substring(0, 100)}`);
@@ -1083,12 +1152,20 @@ async function handleWorkflowRun(room: Room, msg: DashboardWorkflowRun): Promise
       status: result.outcome === 'complete' ? 'complete' : 'error',
       summary: result.summary,
     });
+
+    endAuditSession(
+      auditSessionId,
+      result.outcome === 'complete' ? 'success' : 'failure',
+      result.steps,
+      auditBroadcast,
+    );
   } catch (err) {
     room.sendToDashboard({
       type: 'server_workflow_progress', workflowId,
       step: 0, totalSteps: 0, currentStepName: 'Error', status: 'error',
       summary: `Workflow failed: ${err instanceof Error ? err.message : String(err)}`,
     });
+    endAuditSession(auditSessionId, 'failure', workflowStepCount, auditBroadcast);
   } finally {
     room.agentLoopActive = false;
   }
@@ -1162,6 +1239,14 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
 
   sendDebugLog(room, 'info', 'handleActionConfirm', 'Starting agent loop', `Goal: ${plan.substring(0, 100)}`);
 
+  // Start audit session for this chat-based execution
+  const auditBroadcast: BroadcastFn = (message) => {
+    room.sendToDashboard(message);
+    logRoom(room.id, `[audit] ${message.type}`);
+  };
+  const auditSessionId = startAuditSession(room.id, null, null, plan.substring(0, 100), 'manual', auditBroadcast);
+  let chatStepCount = 0;
+
   // Helper to send progress events to the dashboard
   let currentStep = 0;
   let currentMaxSteps = 0;
@@ -1209,16 +1294,31 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
         onStep: (step: number, maxIterations: number) => {
           currentStep = step;
           currentMaxSteps = maxIterations;
+          chatStepCount = step;
           sendProgress('step', `Step ${step} of ${maxIterations}`);
+          updateAuditSessionStepCount(auditSessionId, step);
         },
         onObservation: (obs: unknown, step: number) => {
           const observation = obs as Record<string, unknown>;
           const app = (observation.frontmostApp as string) || 'unknown';
           const title = (observation.windowTitle as string) || '';
           sendProgress('observing', `Observing: ${app}`, title ? `Window: ${title}` : undefined);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'decision', actionType: 'collect', action: `Observing: ${app}`,
+            result: 'success', controlLayer: null,
+            outputSummary: title ? `Window: ${title}` : null,
+            workflowName: plan.substring(0, 100), stepCount: chatStepCount,
+          }, auditBroadcast);
         },
         onThinking: () => {
           sendProgress('thinking', 'Sending to Claude...');
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'llm_call', actionType: 'transmit', action: 'Sending observation to Claude API',
+            result: 'success', controlLayer: null,
+            workflowName: plan.substring(0, 100), stepCount: chatStepCount,
+          }, auditBroadcast);
         },
         onParsed: (parsed: unknown, step: number) => {
           const p = parsed as Record<string, unknown>;
@@ -1233,22 +1333,60 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
           } else {
             sendProgress('parsed', `Claude response: ${type}`);
           }
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'decision', actionType: 'read', action: `Claude decided: ${type}`,
+            result: 'success', controlLayer: null,
+            outputSummary: type === 'action' ? `Action: ${((p.command as Record<string, unknown>)?.action as string) || 'unknown'}` : type,
+            reasoningContext: (p.thinking as string)?.substring(0, 500) || null,
+            workflowName: plan.substring(0, 100), stepCount: chatStepCount,
+          }, auditBroadcast);
         },
         onAction: (command: AgentCommand, thinking: string) => {
           sendProgress('executing', `Executing: ${command.layer}/${command.action}`, thinking.substring(0, 150), command.layer);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'tool_invocation', actionType: 'modify', action: `${command.layer}/${command.action}`,
+            result: 'success', controlLayer: command.layer as AuditControlLayer,
+            inputHash: crypto.createHash('sha256').update(JSON.stringify(command.params || {})).digest('hex'),
+            reasoningContext: thinking.substring(0, 500),
+            workflowName: plan.substring(0, 100), stepCount: chatStepCount,
+          }, auditBroadcast);
         },
         onActionResult: (command: AgentCommand, result: AgentResult) => {
           const status = result.status === 'success' ? 'Success' : 'Failed';
           sendProgress('action_result', `${status}: ${command.layer}/${command.action}`, undefined, command.layer);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'tool_invocation', actionType: 'read',
+            action: `Result: ${command.layer}/${command.action}`,
+            result: result.status === 'success' ? 'success' : 'failure',
+            controlLayer: command.layer as AuditControlLayer,
+            outputSummary: JSON.stringify(result.data || {}).substring(0, 500),
+            workflowName: plan.substring(0, 100), stepCount: chatStepCount,
+          }, auditBroadcast);
         },
         onComplete: (summary: string) => {
           sendProgress('complete', summary || 'Task completed.');
         },
         onNeedsHelp: (question: string) => {
           sendProgress('needs_help', question);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'human_review', actionType: 'collect', action: `Agent needs help: ${question.substring(0, 200)}`,
+            result: 'success', controlLayer: null,
+            workflowName: plan.substring(0, 100), stepCount: chatStepCount,
+          }, auditBroadcast);
         },
         onError: (error: string, context: string) => {
           sendProgress('error', error, `Context: ${context}`);
+          logAuditEvent({
+            sessionId: auditSessionId, roomId: room.id, userId: null,
+            eventType: 'error', actionType: 'read', action: `Error: ${error}`,
+            result: 'failure', controlLayer: null,
+            reasoningContext: context,
+            workflowName: plan.substring(0, 100), stepCount: chatStepCount,
+          }, auditBroadcast);
         },
         onDecomposition: (subGoals: SubGoal[]) => {
           sendDebugLog(room, 'info', 'agent-loop', `Decomposed into ${subGoals.length} sub-goals`, subGoals.map(sg => sg.label).join(', '));
@@ -1318,6 +1456,13 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
     });
     saveMessageSafe({ id: `resp_complete_${previewId}`, conversationId, role: 'agent', type: 'text', content: completionContent });
     try { updateConversationStatus(conversationId, 'complete'); } catch (e) { /* non-critical */ }
+
+    endAuditSession(
+      auditSessionId,
+      result.outcome === 'complete' ? 'success' : 'failure',
+      result.steps,
+      auditBroadcast,
+    );
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     sendDebugLog(room, 'error', 'handleActionConfirm', `Agent loop failed: ${errorMsg}`);
@@ -1335,6 +1480,7 @@ async function handleActionConfirm(room: Room, msg: DashboardActionConfirm): Pro
       },
     });
     saveMessageSafe({ id: `resp_error_${previewId}`, conversationId, role: 'system', type: 'error', content: errContent });
+    endAuditSession(auditSessionId, 'failure', chatStepCount, auditBroadcast);
   } finally {
     room.agentLoopActive = false;
   }
@@ -1408,26 +1554,149 @@ function getOrCreateRoom(roomId: string): Room {
 }
 
 // ---------------------------------------------------------------------------
+// Audit API HTTP handler
+// ---------------------------------------------------------------------------
+
+function handleAuditRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL,
+  pathname: string,
+): void {
+  // All audit responses: no-store, JSON content type
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'application/json');
+
+  try {
+    // GET /audit/sessions — list sessions with filters
+    if (pathname === '/audit/sessions' && req.method === 'GET') {
+      const roomId = url.searchParams.get('roomId');
+      if (!roomId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'roomId query parameter is required' }));
+        return;
+      }
+      const filters = {
+        roomId,
+        dateFrom: url.searchParams.get('dateFrom') || undefined,
+        dateTo: url.searchParams.get('dateTo') || undefined,
+        department: url.searchParams.get('department') || undefined,
+        terminalState: (url.searchParams.get('terminalState') as any) || undefined,
+        workflowId: url.searchParams.get('workflowId') || undefined,
+        limit: parseInt(url.searchParams.get('limit') || '50', 10),
+      };
+      const sessions = querySessionsFiltered(filters);
+      logRoom(roomId, `[audit-api] GET /audit/sessions — ${sessions.length} results`);
+      res.writeHead(200);
+      res.end(JSON.stringify({ sessions }));
+      return;
+    }
+
+    // GET /audit/sessions/:id/events — events for a session
+    const sessionEventsMatch = pathname.match(/^\/audit\/sessions\/([^/]+)\/events$/);
+    if (sessionEventsMatch && req.method === 'GET') {
+      const sessionId = sessionEventsMatch[1];
+      const roomId = url.searchParams.get('roomId');
+      if (!roomId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'roomId query parameter is required' }));
+        return;
+      }
+      const limit = parseInt(url.searchParams.get('limit') || '200', 10);
+      const events = queryEventsBySession(sessionId, limit);
+      logRoom(roomId, `[audit-api] GET /audit/sessions/${sessionId}/events — ${events.length} results`);
+      res.writeHead(200);
+      res.end(JSON.stringify({ sessionId, events }));
+      return;
+    }
+
+    // GET /audit/export/json — full JSON export
+    if (pathname === '/audit/export/json' && req.method === 'GET') {
+      const roomId = url.searchParams.get('roomId');
+      if (!roomId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'roomId query parameter is required' }));
+        return;
+      }
+      const filters = {
+        roomId,
+        dateFrom: url.searchParams.get('dateFrom') || undefined,
+        dateTo: url.searchParams.get('dateTo') || undefined,
+        limit: parseInt(url.searchParams.get('limit') || '100', 10),
+      };
+      const data = exportJSON(filters);
+      logRoom(roomId, `[audit-api] GET /audit/export/json — ${data.sessions.length} sessions`);
+      res.setHeader('Content-Disposition', `attachment; filename="audit-export-${new Date().toISOString().split('T')[0]}.json"`);
+      res.writeHead(200);
+      res.end(JSON.stringify(data, null, 2));
+      return;
+    }
+
+    // GET /audit/export/csv — CSV export
+    if (pathname === '/audit/export/csv' && req.method === 'GET') {
+      const roomId = url.searchParams.get('roomId');
+      if (!roomId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'roomId query parameter is required' }));
+        return;
+      }
+      const filters = {
+        roomId,
+        dateFrom: url.searchParams.get('dateFrom') || undefined,
+        dateTo: url.searchParams.get('dateTo') || undefined,
+        limit: parseInt(url.searchParams.get('limit') || '100', 10),
+      };
+      const csv = exportCSV(filters);
+      logRoom(roomId, `[audit-api] GET /audit/export/csv`);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="audit-export-${new Date().toISOString().split('T')[0]}.csv"`);
+      res.writeHead(200);
+      res.end(csv);
+      return;
+    }
+
+    // Unknown audit endpoint
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: 'Not found' }));
+  } catch (err) {
+    console.error(`[audit-api] Error handling ${pathname}:`, err instanceof Error ? err.message : String(err));
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: 'Internal server error' }));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket Server with HTTP health endpoint
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   initDatabase();
+  initAuditDatabase();
   agentModulesLoaded = await loadAgentModules();
   initializeRooms();
   loadSkillsFromDisk();
 
   const port = Number(process.env.PORT) || DEFAULT_WS_PORT;
 
-  // HTTP server for health checks
+  // HTTP server for health checks + audit API endpoints
   const httpServer = http.createServer((req, res) => {
-    if (req.url === '/health' && req.method === 'GET') {
+    const url = new URL(req.url || '/', `http://localhost:${port}`);
+    const pathname = url.pathname;
+
+    if (pathname === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok' }));
-    } else {
-      res.writeHead(404);
-      res.end();
+      return;
     }
+
+    // --- Audit API routes ---
+    if (pathname.startsWith('/audit/')) {
+      handleAuditRequest(req, res, url, pathname);
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
   });
 
   // WebSocket server with noServer for Origin validation
@@ -1899,6 +2168,7 @@ async function main(): Promise<void> {
     log(`${signal} received, shutting down...`);
     clearInterval(heartbeatInterval);
     closeDatabase();
+    closeAuditDatabase();
     for (const client of wss.clients) {
       client.close(1001, 'Server shutting down');
     }
